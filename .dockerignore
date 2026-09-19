@@ -4,3 +4,11 @@
 **/dist
 server/uploads
 **/*.log
+**/.gradle
+**/build
+**/local.properties
+**/*.apk
+**/*.aab
+**/*.jks
+**/*.keystore
+**/signing/*.properties

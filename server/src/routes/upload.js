@@ -12,7 +12,7 @@ const ConversationAttachmentController = require('../controllers/ConversationAtt
 
 const router = express.Router();
 const UPLOAD_DIR = path.resolve(__dirname, '..', '..', 'uploads');
-const APP_PUBLIC_ORIGIN = 'https://user.ymfk.top';
+const APP_PUBLIC_ORIGIN = 'https://user.by0.me';
 const MIME_BY_EXTENSION = {
   jpg: ['image/jpeg'], jpeg: ['image/jpeg'], png: ['image/png'], gif: ['image/gif'], webp: ['image/webp'],
   pdf: ['application/pdf'], docx: ['application/vnd.openxmlformats-officedocument.wordprocessingml.document'],

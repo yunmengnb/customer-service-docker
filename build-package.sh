@@ -16,6 +16,14 @@ tar \
   --exclude='*/__pycache__' \
   --exclude='*.pyc' \
   --exclude='*.log' \
+  --exclude='*/.gradle' \
+  --exclude='*/build' \
+  --exclude='*/local.properties' \
+  --exclude='*.apk' \
+  --exclude='*.aab' \
+  --exclude='*.jks' \
+  --exclude='*.keystore' \
+  --exclude='*/signing/*.properties' \
   -czf "$TEMP_ARCHIVE" -C "$ROOT_DIR" .
 
 rm -f "$OUTPUT"

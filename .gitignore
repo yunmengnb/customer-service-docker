@@ -4,3 +4,13 @@
 server/uploads/
 **/*.log
 .git/
+
+# Android 本机配置、构建产物和签名材料
+**/.gradle/
+**/build/
+**/local.properties
+**/*.apk
+**/*.aab
+**/*.jks
+**/*.keystore
+**/signing/*.properties

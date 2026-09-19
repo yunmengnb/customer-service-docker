@@ -1,0 +1,9 @@
+# 忆梦云团队开发 - Android 构建与本机配置忽略规则
+.gradle/
+**/build/
+local.properties
+*.apk
+*.aab
+*.jks
+*.keystore
+signing/*.properties

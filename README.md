@@ -27,6 +27,27 @@ bash <(curl -Ls https://raw.githubusercontent.com/yunmengnb/customer-service-doc
 
 生产环境建议使用 Nginx/Caddy 绑定域名并启用 HTTPS。
 
+## Android APP 源码
+
+项目同时包含两个原生 Android APP：
+
+- `android-native-app/`：租户客服端 APP，包名 `com.user.ymykf`，当前版本 `1.0.0`，访问 `https://user.by0.me`；
+- `customer-android-app/`：客户聊天端 APP，包名 `com.chat.ymykf`，当前版本 `1.0.0`，访问 `https://chat.by0.me`。
+
+使用 Android Studio 打开对应目录，构建环境要求 Java 17、Android SDK 35。也可在对应目录执行：
+
+```bash
+./gradlew assembleDebug
+```
+
+Windows 使用：
+
+```powershell
+.\gradlew.bat assembleDebug
+```
+
+APP 服务地址配置位于各项目的 `AppConfig.java`，部署到自己的域名后应在构建前修改。公开源码不包含 `local.properties`、APK、Gradle 缓存、正式签名属性或 JKS/Keystore 私钥；发布 Release 包时请自行通过环境变量、用户级 Gradle 配置或本地 `signing` 文件配置签名。
+
 ## 发布安装包
 
 在本目录执行：

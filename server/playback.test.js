@@ -119,8 +119,10 @@ test('real Express playback authorization and Range matrix', async t => {
   });
 });
 test('FFmpeg Fast Start moves moov before mdat, returns actual size and preserves failure input', async t => {
-  const ffmpeg = require('ffmpeg-static');
-  try { await fs.access(ffmpeg); } catch (_) { t.skip('FFmpeg binary unavailable'); return; }
+  const ffmpeg = process.env.FFMPEG_PATH || 'ffmpeg';
+  try {
+    await new Promise((resolve, reject) => require('node:child_process').execFile(ffmpeg, ['-version'], err => err ? reject(err) : resolve()));
+  } catch (_) { t.skip('FFmpeg binary unavailable'); return; }
   const { promisify } = require('node:util');
   const exec = promisify(require('node:child_process').execFile);
   const { fastStart } = require('./src/controllers/ConversationAttachmentController');

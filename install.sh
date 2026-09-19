@@ -82,27 +82,28 @@ port_in_use() {
 }
 
 prompt_value() {
-  local var="$1" label="$2" default="$3" value
-  read -r -p "$label [$default]: " value </dev/tty
-  printf -v "$var" '%s' "${value:-$default}"
+  local var="$1" label="$2" default="$3" input=""
+  read -r -p "$label [$default]: " input </dev/tty
+  printf -v "$var" '%s' "${input:-$default}"
 }
 
 prompt_port() {
-  local var="$1" label="$2" default="$3" value
+  local var="$1" label="$2" default="$3" input="" answer=""
   while true; do
-    prompt_value value "$label" "$default"
-    valid_port "$value" || { warn "端口必须是 1-65535 的数字"; continue; }
-    if port_in_use "$value"; then
-      read -r -p "端口 $value 当前已被占用，仍然使用吗？[y/N]: " answer </dev/tty
+    read -r -p "$label [$default]: " input </dev/tty
+    input="${input:-$default}"
+    valid_port "$input" || { warn "端口必须是 1-65535 的数字"; continue; }
+    if port_in_use "$input"; then
+      read -r -p "端口 $input 当前已被占用，仍然使用吗？[y/N]: " answer </dev/tty
       [[ "$answer" =~ ^[Yy]$ ]] || continue
     fi
-    printf -v "$var" '%s' "$value"
+    printf -v "$var" '%s' "$input"
     return
   done
 }
 
 prompt_password() {
-  local var="$1" label="$2" first second
+  local var="$1" label="$2" first="" second=""
   while true; do
     read -r -s -p "$label（至少 8 位）: " first </dev/tty; echo
     [[ ${#first} -ge 8 ]] || { warn "密码长度不能少于 8 位"; continue; }
@@ -213,6 +214,7 @@ printf "  租户客服端：http://%s:%s\n" "$PUBLIC_HOST" "$USER_PORT"
 printf "  客户聊天端：http://%s:%s\n" "$PUBLIC_HOST" "$CLIENT_PORT"
 printf "  管理员账号：%s\n" "$ADMIN_USERNAME"
 printf "  默认租户：%s (%s)\n\n" "$TENANT_NAME" "$TENANT_USERNAME"
+confirm=""
 read -r -p "确认开始安装？[y/N]: " confirm </dev/tty
 [[ "$confirm" =~ ^[Yy]$ ]] || { warn "已取消安装"; exit 0; }
 

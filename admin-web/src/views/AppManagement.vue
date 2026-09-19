@@ -188,19 +188,14 @@ async function toggleVersion(item) {
   }
 }
 
-async function removeItem(type, item) {
-  const label = type === 'announcement' ? `公告「${item.title}」` : `版本「${versionLabel(item)}」`
-  if (!window.confirm(`删除后无法恢复，确认删除${label}？`)) return
+async function removeAnnouncement(item) {
+  if (!window.confirm(`删除后无法恢复，确认删除公告「${item.title}」？`)) return
   operatingId.value = item._id
   try {
-    const versionBaseUrl = item.appType === 'customer'
-      ? '/admin/app/customer-center/android/versions'
-      : '/admin/app/android/versions'
-    const url = type === 'announcement' ? `/admin/app/announcements/${item._id}` : `${versionBaseUrl}/${item._id}`
-    const res = await api.delete(url)
+    const res = await api.delete(`/admin/app/announcements/${item._id}`)
     if (res.code !== 0) throw new Error(res.message || '删除失败')
     showNotice('success', '删除成功')
-    await (type === 'announcement' ? loadAnnouncements() : loadVersions())
+    await loadAnnouncements()
   } catch (error) {
     showNotice('error', error?.message || '删除失败')
   } finally {
@@ -245,7 +240,7 @@ onMounted(loadAnnouncements)
             <td data-label="内容摘要" class="summary-cell">{{ item.content }}</td>
             <td data-label="状态"><span class="tag" :class="item.status === 'published' ? 'tag-green' : 'tag-gray'">{{ item.status === 'published' ? '已上架' : '已下架' }}</span></td>
             <td data-label="发布时间">{{ formatDate(item.publishedAt) }}</td>
-            <td v-if="canWrite" data-label="操作" class="actions"><div class="action-list"><button class="btn-link" type="button" :disabled="Boolean(operatingId)" @click="openAnnouncementModal(item)">编辑</button><button class="btn-link" type="button" :disabled="Boolean(operatingId)" @click="toggleAnnouncement(item)">{{ item.status === 'published' ? '下架' : '上架' }}</button><button class="btn-link danger" type="button" :disabled="Boolean(operatingId) || Boolean(item.key)" @click="removeItem('announcement', item)">删除</button></div></td>
+            <td v-if="canWrite" data-label="操作" class="actions"><div class="action-list"><button class="btn-link" type="button" :disabled="Boolean(operatingId)" @click="openAnnouncementModal(item)">编辑</button><button class="btn-link" type="button" :disabled="Boolean(operatingId)" @click="toggleAnnouncement(item)">{{ item.status === 'published' ? '下架' : '上架' }}</button><button class="btn-link danger" type="button" :disabled="Boolean(operatingId) || Boolean(item.key)" @click="removeAnnouncement(item)">删除</button></div></td>
           </tr>
           <tr v-if="announcementLoading"><td :colspan="canWrite ? 6 : 5" class="empty-cell">正在加载...</td></tr>
           <tr v-else-if="!announcements.length"><td :colspan="canWrite ? 6 : 5" class="empty-cell">暂无 APP 公告</td></tr>
@@ -256,12 +251,12 @@ onMounted(loadAnnouncements)
 
   <section v-else>
     <div class="section-toolbar">
-      <div><h2>Android 版本管理</h2><p>管理 Android 安装包版本和更新策略</p></div>
+      <div><h2>Android 版本管理</h2><p>同一 APP 类型同时只能上架一个版本，发布新版本会自动下架旧版本；历史草稿仍会保留。</p></div>
       <button v-if="canWrite" class="btn btn-primary" type="button" @click="openVersionModal()">新增版本</button>
     </div>
     <div class="table-wrap">
       <table class="table">
-        <thead><tr><th>版本</th><th>版本号</th><th>APP 类型</th><th>平台</th><th>更新策略</th><th>状态</th><th>创建时间</th><th v-if="canWrite" class="actions">操作</th></tr></thead>
+        <thead><tr><th>版本</th><th>版本号</th><th>APP 类型</th><th>平台</th><th>更新策略</th><th>状态</th><th>允许下载</th><th>已发布时间</th><th>下载</th><th v-if="canWrite" class="actions">操作</th></tr></thead>
         <tbody>
           <tr v-for="item in versions" :key="item._id">
             <td data-label="版本"><strong>{{ versionLabel(item) }}</strong></td>
@@ -270,11 +265,13 @@ onMounted(loadAnnouncements)
             <td data-label="平台">{{ item.platform || '-' }}</td>
             <td data-label="更新策略"><span class="tag" :class="item.forceUpdate ? 'tag-red' : 'tag-blue'">{{ item.forceUpdate ? '强制更新' : '可选更新' }}</span></td>
             <td data-label="状态"><span class="tag" :class="item.status === 'published' ? 'tag-green' : 'tag-gray'">{{ item.status === 'published' ? '已发布' : '草稿' }}</span></td>
-            <td data-label="创建时间">{{ formatDate(item.createdAt) }}</td>
-            <td v-if="canWrite" data-label="操作" class="actions"><div class="action-list"><button class="btn-link" type="button" :disabled="Boolean(operatingId)" @click="openVersionModal(item)">编辑</button><button class="btn-link" type="button" :disabled="Boolean(operatingId)" @click="toggleVersion(item)">{{ item.status === 'published' ? '下架' : '发布' }}</button><button class="btn-link danger" type="button" :disabled="Boolean(operatingId)" @click="removeItem('version', item)">删除</button></div></td>
+            <td data-label="允许下载"><span class="tag" :class="item.downloadEnabled !== false ? 'tag-green' : 'tag-gray'">{{ item.downloadEnabled !== false ? '允许' : '禁止' }}</span></td>
+            <td data-label="已发布时间">{{ formatDate(item.publishedAt) }}</td>
+            <td data-label="下载"><a v-if="item.status === 'published' && item.downloadEnabled !== false && item.downloadUrl" class="btn-link" :href="item.downloadUrl" target="_blank" rel="noopener">下载</a><span v-else>-</span></td>
+            <td v-if="canWrite" data-label="操作" class="actions"><div class="action-list"><button class="btn-link" type="button" :disabled="Boolean(operatingId)" @click="openVersionModal(item)">编辑</button><button class="btn-link" type="button" :disabled="Boolean(operatingId)" @click="toggleVersion(item)">{{ item.status === 'published' ? '下架' : '发布' }}</button></div></td>
           </tr>
-          <tr v-if="versionLoading"><td :colspan="canWrite ? 8 : 7" class="empty-cell">正在加载...</td></tr>
-          <tr v-else-if="!versions.length"><td :colspan="canWrite ? 8 : 7" class="empty-cell">暂无 APP 版本</td></tr>
+          <tr v-if="versionLoading"><td :colspan="canWrite ? 10 : 9" class="empty-cell">正在加载...</td></tr>
+          <tr v-else-if="!versions.length"><td :colspan="canWrite ? 10 : 9" class="empty-cell">暂无 APP 版本</td></tr>
         </tbody>
       </table>
     </div>

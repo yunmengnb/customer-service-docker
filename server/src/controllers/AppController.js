@@ -14,6 +14,32 @@ function validId(id) {
   return mongoose.isValidObjectId(id);
 }
 
+function appTypeQuery(appType) {
+  if (appType === 'staff') return { $in: ['staff', null] };
+  return 'customer';
+}
+
+async function unpublishOtherVersions(appType, versionId) {
+  await AppVersion.updateMany({
+    _id: { $ne: versionId },
+    platform: 'android',
+    appType: appTypeQuery(appType),
+    status: 'published',
+  }, {
+    $set: { status: 'draft', publishedAt: null },
+  });
+}
+
+function findLatestPublicVersion(appType) {
+  return AppVersion.findOne({
+    platform: 'android',
+    appType: appTypeQuery(appType),
+    status: 'published',
+    publishedAt: { $lte: new Date() },
+    downloadEnabled: { $ne: false },
+  }).sort({ versionCode: -1 }).lean();
+}
+
 class AppController {
   constructor() {
     [
@@ -31,6 +57,10 @@ class AppController {
       'publicCustomerAnnouncementDetail',
       'checkAndroidUpdate',
       'checkCustomerAndroidUpdate',
+      'getAndroidVersion',
+      'getCustomerAndroidVersion',
+      'downloadAndroid',
+      'downloadCustomerAndroid',
     ].forEach(method => {
       this[method] = this[method].bind(this);
     });
@@ -182,6 +212,7 @@ class AppController {
       status,
       publishedAt: status === 'published' ? new Date() : null,
     });
+    if (status === 'published') await unpublishOtherVersions(appType, version._id);
     res.status(201);
     return ok(res, version.toJSON(), `${appType === 'customer' ? '客户中心' : '坐席'} Android 版本创建成功`);
   }
@@ -213,6 +244,7 @@ class AppController {
       version.publishedAt = req.body.status === 'published' ? new Date() : null;
     }
     await version.save();
+    if (version.status === 'published') await unpublishOtherVersions(appType, version._id);
     return ok(res, version.toJSON(), 'Android 版本更新成功');
   }
 
@@ -245,6 +277,7 @@ class AppController {
     version.status = req.body.status;
     version.publishedAt = req.body.status === 'published' ? new Date() : null;
     await version.save();
+    if (version.status === 'published') await unpublishOtherVersions(appType, version._id);
     return ok(res, version.toJSON(), req.body.status === 'published' ? 'Android 版本已发布' : 'Android 版本已下架');
   }
 
@@ -295,29 +328,31 @@ class AppController {
     return ok(res, { hasUpdate, version: result });
   }
 
+  async getAndroidVersion(req, res) {
+    return this.getAndroidVersionFor('staff', req, res);
+  }
+
   async getCustomerAndroidVersion(req, res) {
-    const version = await AppVersion.findOne({
-      platform: 'android',
-      appType: 'customer',
-      status: 'published',
-      publishedAt: { $lte: new Date() },
-    }).sort({ versionCode: -1 }).lean();
-    if (!version) return error(res, '客户 Android 版本暂未发布', 404, 404);
-    return ok(res, {
-      ...version,
-      downloadUrl: version.downloadEnabled === false ? '' : version.downloadUrl,
-    });
+    return this.getAndroidVersionFor('customer', req, res);
+  }
+
+  async getAndroidVersionFor(appType, req, res) {
+    const version = await findLatestPublicVersion(appType);
+    if (!version) return error(res, `${appType === 'customer' ? '客户' : '坐席'} Android 版本暂未发布`, 404, 404);
+    return ok(res, version);
+  }
+
+  async downloadAndroid(req, res) {
+    return this.downloadAndroidFor('staff', req, res);
   }
 
   async downloadCustomerAndroid(req, res) {
-    const version = await AppVersion.findOne({
-      platform: 'android',
-      appType: 'customer',
-      status: 'published',
-      publishedAt: { $lte: new Date() },
-    }).sort({ versionCode: -1 }).lean();
-    if (!version) return error(res, '客户 Android 版本暂未发布', 404, 404);
-    if (version.downloadEnabled === false) return error(res, '客户 Android APP 暂停下载', 403, 403);
+    return this.downloadAndroidFor('customer', req, res);
+  }
+
+  async downloadAndroidFor(appType, req, res) {
+    const version = await findLatestPublicVersion(appType);
+    if (!version) return error(res, `${appType === 'customer' ? '客户' : '坐席'} Android 版本暂未发布`, 404, 404);
     return res.redirect(302, version.downloadUrl);
   }
 }

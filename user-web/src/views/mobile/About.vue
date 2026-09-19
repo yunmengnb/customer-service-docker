@@ -26,8 +26,8 @@ async function downloadAndroidApp() {
   downloading.value = true
   downloadError.value = ''
   try {
-    const res = await api.get('/app/android/check-update', { params: { versionCode: 1 } })
-    const downloadUrl = res.code === 0 ? res.data?.version?.downloadUrl : ''
+    const res = await api.get('/app/android/version')
+    const downloadUrl = res.code === 0 ? res.data?.downloadUrl : ''
     if (!downloadUrl) throw new Error('暂无可下载的坐席客户端')
     window.location.assign(downloadUrl)
   } catch (error) {

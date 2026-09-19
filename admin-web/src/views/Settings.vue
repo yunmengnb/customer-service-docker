@@ -1,10 +1,11 @@
 <!-- 忆梦云团队开发 - 系统设置 -->
 <script setup>
-import { computed, onMounted, reactive, ref, toRaw } from 'vue'
+import { computed, onMounted, reactive, ref, toRaw, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+
 import api from '../api'
 
 const tabs = [
-  { key: 'app', label: 'APP 配置' },
   { key: 'upload', label: '存储配置' },
   { key: 'data', label: '数据管理' },
   { key: 'captcha', label: '验证码' },
@@ -57,17 +58,12 @@ const defaults = {
   },
 }
 
-const activeTab = ref('app')
+const route = useRoute()
+const router = useRouter()
+const tabKeys = new Set(tabs.map(tab => tab.key))
+const activeTab = ref(tabKeys.has(route.query.tab) ? route.query.tab : 'upload')
 const loading = ref(true)
 const saving = ref(false)
-const uploadingApk = ref(false)
-const apkInput = ref(null)
-const apkUpload = reactive({ url: '', name: '', size: 0 })
-const appDownloadOrigin = 'https://user.by0.me'
-const appAnnouncement = reactive({ id: '', title: '', content: '', status: 'published' })
-const appVersion = reactive({ versionName: '', versionCode: null, downloadUrl: '', releaseNotes: '', forceUpdate: false, status: 'published' })
-const publishingAnnouncement = ref(false)
-const publishingApp = ref(false)
 const testingEmail = ref(false)
 const testEmailTo = ref('')
 const loadingCleanupStatus = ref(false)
@@ -83,7 +79,16 @@ const exportForm = reactive({ type: 'tenants', format: 'csv' })
 const exporting = ref(false)
 const notice = ref(null)
 const form = reactive(structuredClone(defaults))
-const currentTab = computed(() => tabs.find(tab => tab.key === activeTab.value))
+const currentTab = computed(() => tabs.find(tab => tab.key === activeTab.value) || tabs[0])
+
+watch(() => route.query.tab, tab => {
+  if (tabKeys.has(tab)) activeTab.value = tab
+})
+
+function selectTab(tab) {
+  activeTab.value = tab
+  router.replace({ path: route.path, query: { ...route.query, tab } })
+}
 
 function applySettings(data) {
   const source = data?.settings || data || {}
@@ -119,21 +124,9 @@ async function loadSettings() {
   loading.value = true
   notice.value = null
   try {
-    const [res, announcementRes] = await Promise.all([
-      api.get('/admin/settings'),
-      api.get('/admin/app/announcements?limit=1'),
-    ])
+    const res = await api.get('/admin/settings')
     if (res.code !== 0) throw new Error(res.message || '系统设置加载失败')
     applySettings(res.data)
-    const latestAnnouncement = announcementRes.code === 0 ? announcementRes.data?.items?.[0] : null
-    if (latestAnnouncement) {
-      Object.assign(appAnnouncement, {
-        id: latestAnnouncement._id,
-        title: latestAnnouncement.title || '',
-        content: latestAnnouncement.content || '',
-        status: latestAnnouncement.status || 'draft',
-      })
-    }
   } catch (error) {
     showNotice('error', error?.message || '系统设置加载失败')
   } finally {
@@ -163,55 +156,6 @@ async function saveSettings() {
     showNotice('error', error?.message || '系统设置保存失败')
   } finally {
     saving.value = false
-  }
-}
-
-async function uploadApk(event) {
-  const file = event.target.files?.[0]
-  if (!file) return
-  if (!file.name.toLowerCase().endsWith('.apk')) {
-    showNotice('error', '请选择 APK 安装包')
-    event.target.value = ''
-    return
-  }
-  uploadingApk.value = true
-  notice.value = null
-  try {
-    const data = new FormData()
-    data.append('file', file)
-    const res = await api.upload('/upload/admin/app-apk', data)
-    if (res.code !== 0 || !res.data?.url) throw new Error(res.message || 'APK 上传失败')
-    Object.assign(apkUpload, res.data)
-    appVersion.downloadUrl = new URL(res.data.url, appDownloadOrigin).href
-    showNotice('success', 'APK 上传成功，下载地址已填入版本配置')
-  } catch (error) {
-    showNotice('error', error?.message || 'APK 上传失败')
-  } finally {
-    uploadingApk.value = false
-    event.target.value = ''
-  }
-}
-
-function useApkUrl() {
-  navigator.clipboard?.writeText(new URL(apkUpload.url, appDownloadOrigin).href)
-  showNotice('success', 'APK 下载地址已复制')
-}
-
-async function publishAnnouncement() {
-  publishingAnnouncement.value = true
-  notice.value = null
-  try {
-    const payload = { title: appAnnouncement.title, content: appAnnouncement.content, status: appAnnouncement.status }
-    const res = appAnnouncement.id
-      ? await api.put(`/admin/app/announcements/${appAnnouncement.id}`, payload)
-      : await api.post('/admin/app/announcements', payload)
-    if (res.code !== 0) throw new Error(res.message || 'APP 公告保存失败')
-    appAnnouncement.id = res.data?._id || appAnnouncement.id
-    showNotice('success', appAnnouncement.status === 'published' ? 'APP 公告已发布' : 'APP 公告草稿已保存')
-  } catch (error) {
-    showNotice('error', error?.message || 'APP 公告保存失败')
-  } finally {
-    publishingAnnouncement.value = false
   }
 }
 
@@ -338,21 +282,6 @@ async function exportData() {
   }
 }
 
-async function publishAppVersion() {
-  publishingApp.value = true
-  notice.value = null
-  try {
-    const payload = { ...appVersion, versionCode: Number(appVersion.versionCode) }
-    const res = await api.post('/admin/app/android/versions', payload)
-    if (res.code !== 0) throw new Error(res.message || 'APP 版本发布失败')
-    showNotice('success', appVersion.status === 'published' ? 'APP 版本已发布' : 'APP 版本草稿已创建')
-  } catch (error) {
-    showNotice('error', error?.message || 'APP 版本发布失败')
-  } finally {
-    publishingApp.value = false
-  }
-}
-
 async function testEmail() {
   if (!/^\S+@\S+\.\S+$/.test(testEmailTo.value.trim())) {
     showNotice('error', '请输入正确的收件邮箱')
@@ -382,9 +311,9 @@ onMounted(() => {
   <div class="page-header settings-heading">
     <div>
       <h1>系统设置</h1>
-      <p class="desc">配置 APP 发布、存储与附件清理、验证码、发信邮箱、注册登录、网站信息以及违禁词规则</p>
+      <p class="desc">配置存储与附件清理、验证码、发信邮箱、注册登录、网站信息以及违禁词规则</p>
     </div>
-    <button v-if="activeTab !== 'app'" class="btn btn-primary" :disabled="loading || saving" @click="saveSettings">
+    <button class="btn btn-primary" :disabled="loading || saving" @click="saveSettings">
       {{ saving ? '保存中...' : '保存设置' }}
     </button>
   </div>
@@ -403,7 +332,7 @@ onMounted(() => {
         type="button"
         role="tab"
         :aria-selected="activeTab === tab.key"
-        @click="activeTab = tab.key"
+        @click="selectTab(tab.key)"
       >
         {{ tab.label }}
       </button>
@@ -415,8 +344,7 @@ onMounted(() => {
       <template v-else>
         <div class="panel-title">
           <h2>{{ currentTab.label }}设置</h2>
-          <p v-if="activeTab === 'app'">上传 Android 安装包，并复用现有 APP 版本 API 配置发布信息。</p>
-          <p v-else-if="activeTab === 'upload'">配置平台上传限制（文件大小与扩展名）。</p>
+          <p v-if="activeTab === 'upload'">配置平台上传限制（文件大小与扩展名）。</p>
           <p v-else-if="activeTab === 'data'">查看数据统计、导出数据、清理历史数据与过期附件。</p>
           <p v-else-if="activeTab === 'captcha'">配置人机验证服务及验证码有效期。</p>
           <p v-else-if="activeTab === 'smtp'">配置用于通知和验证邮件的 SMTP 服务。</p>
@@ -426,50 +354,7 @@ onMounted(() => {
           <p v-else>配置客服访问域名与网站搜索展示信息。</p>
         </div>
 
-        <div v-if="activeTab === 'app'" class="settings-grid">
-          <div class="apk-upload-card full-width">
-            <div>
-              <strong>Android APK 安装包</strong>
-              <span>仅超级管理员可上传，支持最大 200MB 的 .apk 文件。</span>
-            </div>
-            <input ref="apkInput" class="file-input" type="file" accept=".apk,application/vnd.android.package-archive" @change="uploadApk" />
-            <button class="btn btn-primary" type="button" :disabled="uploadingApk" @click="apkInput?.click()">
-              {{ uploadingApk ? '上传中...' : '选择并上传 APK' }}
-            </button>
-          </div>
-          <div v-if="apkUpload.url" class="apk-result full-width">
-            <div><strong>{{ apkUpload.name }}</strong><span>{{ formatFileSize(apkUpload.size) }}</span></div>
-            <a :href="apkUpload.url" target="_blank" rel="noopener">下载安装包</a>
-            <button class="btn btn-ghost" type="button" @click="useApkUrl">复制下载地址</button>
-          </div>
-          <form class="app-version-form full-width" @submit.prevent="publishAnnouncement">
-            <h3>APP 公告配置</h3>
-            <div class="settings-grid">
-              <div class="input-group full-width"><label for="app-announcement-title">公告标题</label><input id="app-announcement-title" v-model.trim="appAnnouncement.title" class="input" maxlength="200" required /></div>
-              <div class="input-group full-width"><label for="app-announcement-content">公告内容</label><textarea id="app-announcement-content" v-model.trim="appAnnouncement.content" class="textarea" rows="6" required></textarea></div>
-              <div class="input-group"><label for="app-announcement-status">发布状态</label><select id="app-announcement-status" v-model="appAnnouncement.status" class="select"><option value="published">立即发布</option><option value="draft">保存草稿</option></select></div>
-            </div>
-            <div class="app-version-actions"><RouterLink class="btn btn-ghost" to="/apps">查看公告记录</RouterLink><button class="btn btn-primary" type="submit" :disabled="publishingAnnouncement">{{ publishingAnnouncement ? '提交中...' : (appAnnouncement.status === 'published' ? '发布公告' : '保存公告草稿') }}</button></div>
-          </form>
-          <form class="app-version-form full-width" @submit.prevent="publishAppVersion">
-            <h3>版本发布配置</h3>
-            <div class="settings-grid">
-              <div class="input-group"><label for="app-version-name">版本名称</label><input id="app-version-name" v-model.trim="appVersion.versionName" class="input" placeholder="如 1.2.0" maxlength="50" required /></div>
-              <div class="input-group"><label for="app-version-code">版本号</label><input id="app-version-code" v-model.number="appVersion.versionCode" class="input" type="number" min="1" required /></div>
-              <div class="input-group full-width"><label for="app-download-url">下载地址</label><input id="app-download-url" v-model.trim="appVersion.downloadUrl" class="input" type="url" placeholder="上传 APK 后自动填入，也可填写 HTTPS 地址" required /></div>
-              <div class="input-group full-width"><label for="app-release-notes">更新说明</label><textarea id="app-release-notes" v-model.trim="appVersion.releaseNotes" class="textarea" rows="4"></textarea></div>
-              <div class="input-group"><label for="app-version-status">发布状态</label><select id="app-version-status" v-model="appVersion.status" class="select"><option value="published">立即发布</option><option value="draft">保存草稿</option></select></div>
-              <label class="check-field"><input v-model="appVersion.forceUpdate" type="checkbox" /> 强制用户更新</label>
-            </div>
-            <div class="app-version-actions">
-              <RouterLink class="btn btn-ghost" to="/apps">查看版本记录</RouterLink>
-              <button class="btn btn-primary" type="submit" :disabled="publishingApp">{{ publishingApp ? '提交中...' : '提交版本配置' }}</button>
-            </div>
-          </form>
-          <div class="app-api-tip full-width">版本提交复用现有 APP 版本 API，客户端继续通过公开更新检查接口获取最新已发布版本。</div>
-        </div>
-
-        <div v-else-if="activeTab === 'upload'" class="settings-grid storage-settings">
+        <div v-if="activeTab === 'upload'" class="settings-grid storage-settings">
           <h3 class="section-heading full-width">上传规则</h3>
           <div class="input-group">
             <label for="upload-limit">单文件大小上限（MB）</label>
@@ -741,16 +626,7 @@ onMounted(() => {
 .panel-title p { margin: 6px 0 0; color: var(--text-muted); font-size: 13px; }
 .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 24px; max-width: 820px; }
 .settings-grid .full-width { grid-column: 1 / -1; }
-.apk-upload-card, .apk-result { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px; border: 1px solid var(--border); border-radius: var(--radius-md); background: #f8fafc; }
-.apk-upload-card strong, .apk-upload-card span, .apk-result strong, .apk-result span { display: block; }
-.apk-upload-card span, .apk-result span { margin-top: 4px; color: var(--text-muted); font-size: 12px; }
-.file-input { display: none; }
-.apk-result a, .app-api-tip a { color: var(--primary); font-weight: 600; }
-.app-version-form { margin-top: 16px; padding: 20px; border: 1px solid var(--border); border-radius: var(--radius-md); }
-.app-version-form h3 { margin-bottom: 18px; font-size: 15px; }
-.app-version-actions { display: flex; justify-content: flex-end; gap: 10px; }
 .check-field { display: flex; align-items: center; gap: 8px; color: var(--text-sec); font-size: 13px; }
-.app-api-tip { padding: 14px 16px; border-radius: var(--radius-md); background: var(--primary-soft); color: var(--text-sec); font-size: 13px; line-height: 1.6; }
 .section-heading { margin-bottom: 10px; font-size: 15px; }
 .storage-divider { height: 1px; margin: 14px 0 18px; background: var(--border); }
 .section-title-row, .cleanup-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
@@ -796,11 +672,7 @@ onMounted(() => {
   .settings-panel { padding: 22px 16px; }
   .settings-grid { grid-template-columns: 1fr; }
   .settings-grid .full-width { grid-column: auto; }
-  .apk-upload-card, .apk-result { align-items: stretch; flex-direction: column; }
   .overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .apk-upload-card .btn, .apk-result .btn { width: 100%; }
-  .app-version-form { padding: 16px; }
-  .app-version-actions { align-items: stretch; flex-direction: column; }
   .section-title-row, .cleanup-card-header { align-items: stretch; flex-direction: column; }
   .safety-label { align-self: flex-start; }
   .cleanup-options, .status-grid { grid-template-columns: 1fr; }

@@ -5,10 +5,11 @@ const PlatformAdmin = require('./src/models/PlatformAdmin');
 const { hashPassword } = require('./src/utils');
 
 async function resetAdminPassword() {
+  const currentUsername = String(process.env.RESET_ADMIN_CURRENT_USERNAME || process.env.RESET_ADMIN_USERNAME || '').trim();
   const username = String(process.env.RESET_ADMIN_USERNAME || '').trim();
   const password = String(process.env.RESET_ADMIN_PASSWORD || '');
 
-  if (!/^[A-Za-z0-9_.-]{3,50}$/.test(username)) {
+  if (!/^[A-Za-z0-9_.-]{3,50}$/.test(currentUsername) || !/^[A-Za-z0-9_.-]{3,50}$/.test(username)) {
     throw new Error('管理员账号格式不正确');
   }
   if (password.length < 8 || !/^[A-Za-z0-9_@%+=:,!.-]+$/.test(password)) {
@@ -16,11 +17,15 @@ async function resetAdminPassword() {
   }
 
   await connectDB();
-  const admin = await PlatformAdmin.findOne({ username });
+  const admin = await PlatformAdmin.findOne({ username: currentUsername });
   if (!admin) {
-    throw new Error(`管理员不存在: ${username}`);
+    throw new Error(`管理员不存在: ${currentUsername}`);
+  }
+  if (username !== currentUsername && await PlatformAdmin.exists({ username })) {
+    throw new Error(`管理员账号已存在: ${username}`);
   }
 
+  admin.username = username;
   admin.password = hashPassword(password);
   admin.loginAttempts = 0;
   admin.lockedUntil = undefined;

@@ -227,6 +227,9 @@ fi
 
 download_source
 write_env "$PUBLIC_HOST"
+install -m 0755 "$INSTALL_DIR/ym-kf.sh" /usr/local/bin/ym-kf
+printf 'INSTALL_DIR=%q\nDOWNLOAD_BASE_URL=%q\nPACKAGE_URL=%q\n' "$INSTALL_DIR" "$DOWNLOAD_BASE_URL" "$PACKAGE_URL" > /etc/ym-kf.conf
+chmod 600 /etc/ym-kf.conf
 
 info "拉取镜像并构建服务"
 compose -f "$INSTALL_DIR/docker-compose.yml" --env-file "$INSTALL_DIR/.env" pull mongo redis

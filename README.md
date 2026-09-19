@@ -45,6 +45,24 @@ KF_PACKAGE_URL=https://example.com/download/kf-docker.tar.gz \
 bash <(curl -Ls https://example.com/download/install.sh)
 ```
 
+## 管理菜单
+
+安装完成后，在终端执行：
+
+```bash
+ym-kf
+```
+
+可使用以下菜单：
+
+```text
+1. 安装/升级系统
+2. 重置管理员账号密码
+3. 卸载程序
+4. 重置端口
+0. 退出菜单
+```
+
 ## 常用管理命令
 
 安装后进入安装目录：

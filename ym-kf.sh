@@ -36,18 +36,18 @@ valid_port() {
 }
 
 prompt_port() {
-  local var="$1" label="$2" default="$3" value
+  local var="$1" label="$2" default="$3" input=""
   while true; do
-    read -r -p "$label [$default]: " value </dev/tty
-    value="${value:-$default}"
-    valid_port "$value" || { warn "端口必须是 1-65535 的数字"; continue; }
-    printf -v "$var" '%s' "$value"
+    read -r -p "$label [$default]: " input </dev/tty
+    input="${input:-$default}"
+    valid_port "$input" || { warn "端口必须是 1-65535 的数字"; continue; }
+    printf -v "$var" '%s' "$input"
     return
   done
 }
 
 prompt_password() {
-  local var="$1" label="$2" first second
+  local var="$1" label="$2" first="" second=""
   while true; do
     read -r -s -p "$label（至少 8 位）: " first </dev/tty; echo
     [[ ${#first} -ge 8 ]] || { warn "密码长度不能少于 8 位"; continue; }
@@ -146,7 +146,7 @@ reset_ports() {
 
 uninstall_app() {
   require_install
-  local remove_data answer
+  local remove_data="" answer=""
   read -r -p "确认卸载程序？[y/N]: " answer </dev/tty
   [[ "$answer" =~ ^[Yy]$ ]] || { warn "已取消卸载"; return; }
   read -r -p "同时永久删除数据库、Redis 和上传数据？[y/N]: " remove_data </dev/tty

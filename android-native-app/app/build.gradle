@@ -3,6 +3,33 @@ plugins {
     id 'com.android.application'
 }
 
+def releasePropertiesFile = rootProject.file('signing/customer-release-v2.properties')
+def releaseProperties = new Properties()
+if (releasePropertiesFile.isFile()) {
+    releasePropertiesFile.withInputStream { releaseProperties.load(it) }
+}
+def releaseValue = { String name ->
+    def environmentValue = providers.environmentVariable(name).orNull
+    environmentValue ?: releaseProperties.getProperty(name) ?: providers.gradleProperty(name).orNull ?: ''
+}
+def releaseKeystorePath = releaseValue('CUSTOMER_RELEASE_STORE_FILE')
+def releaseKeystore = releaseKeystorePath ? rootProject.file(releaseKeystorePath) : null
+def releaseStorePassword = releaseValue('CUSTOMER_RELEASE_STORE_PASSWORD')
+def releaseKeyAlias = releaseValue('CUSTOMER_RELEASE_KEY_ALIAS')
+def releaseKeyPassword = releaseValue('CUSTOMER_RELEASE_KEY_PASSWORD')
+def releaseBuildRequested = gradle.startParameter.taskNames.any {
+    it.toLowerCase(Locale.ROOT).contains('release')
+}
+def releaseSigningReady = releaseKeystore?.isFile() && releaseStorePassword && releaseKeyAlias && releaseKeyPassword
+
+if (releaseBuildRequested && !releaseSigningReady) {
+    throw new GradleException(
+            'Release 签名配置不完整。请配置 signing/customer-release-v2.properties，' +
+                    '或通过环境变量/用户级 ~/.gradle/gradle.properties 设置 CUSTOMER_RELEASE_STORE_FILE、' +
+                    'CUSTOMER_RELEASE_STORE_PASSWORD、CUSTOMER_RELEASE_KEY_ALIAS、CUSTOMER_RELEASE_KEY_PASSWORD。'
+    )
+}
+
 android {
     namespace 'com.user.ymykf'
     compileSdk 35
@@ -15,8 +42,20 @@ android {
         versionName '1.0.0'
     }
 
+    signingConfigs {
+        release {
+            if (releaseSigningReady) {
+                storeFile releaseKeystore
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig signingConfigs.release
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }

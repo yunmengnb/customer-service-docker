@@ -36,10 +36,10 @@ async function start() {
   // 连接数据库；Redis 为可选依赖，失败时自动降级
   await connectDB();
   await connectRedis();
-  
+
   const app = express();
   const server = http.createServer(app);
-  
+
   // Socket.IO
   const io = new Server(server, {
     cors: {
@@ -48,11 +48,11 @@ async function start() {
     },
     transports: ['websocket', 'polling'],
   });
-  
+
   await setupSocketIO(io);
   ChatController.setIO(io);
   app.set('io', io);
-  
+
   // 中间件
   app.use(helmet({
     contentSecurityPolicy: false, // 开发阶段关闭
@@ -66,7 +66,7 @@ async function start() {
   }));
   app.use(express.urlencoded({ extended: true }));
   app.use(requestId);
-  
+
   // ============ 限流（登录接口）============
   const redis = getRedis();
   const loginLimiter = rateLimit({
@@ -83,7 +83,7 @@ async function start() {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
   app.use('/uploads/conversations', (req, res) => res.status(404).json({ code: 404, message: '资源不存在' }));
   app.use('/uploads', express.static(UPLOAD_DIR));
-  
+
   // 健康检查
   app.get('/api/health', async (req, res) => {
     const redisClient = getRedis();
@@ -108,6 +108,7 @@ async function start() {
   // 分布式认证限流必须在业务路由之前挂载
   app.use('/api/admin/auth/login', loginLimiter);
   app.use('/api/tenant/auth/login', loginLimiter);
+  app.use('/api/integration/employee-token-login', loginLimiter);
   app.use('/api/tenant/auth/register', loginLimiter);
   app.use('/api/client/auth/login', loginLimiter);
   app.use('/api/client/auth/register-code', loginLimiter);
@@ -126,12 +127,12 @@ async function start() {
   app.use('/api/upload/complaint', complaintUploadRoutes);
   app.use('/api/upload', uploadRoutes);
   app.use('/api/integration', integrationRoutes);
-  
+
   // 404
   app.use((req, res) => {
     res.status(404).json({ code: 404, message: '接口不存在', requestId: res.locals.requestId });
   });
-  
+
   // 全局错误处理
   app.use((err, req, res, next) => {
     console.error('[Error]', err);
@@ -141,7 +142,7 @@ async function start() {
       requestId: res.locals.requestId,
     });
   });
-  
+
   server.listen(config.port, () => {
     attachmentCleanupService.start(io);
     ensureDefaultAgreements().catch(err => console.error('[Server] 默认协议初始化失败:', err));

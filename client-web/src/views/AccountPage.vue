@@ -16,9 +16,15 @@
         </div>
         <nav class="auth-tabs account-auth-tabs">
           <button type="button" :class="{ active: authTab === 'login' }" @click="switchAuthTab('login')">登录</button>
-          <button type="button" :class="{ active: authTab === 'register' }" @click="switchAuthTab('register')">注册</button>
+          <button
+            v-if="registerEnabled"
+            type="button"
+            :class="{ active: authTab === 'register' }"
+            @click="switchAuthTab('register')"
+          >注册</button>
           <button type="button" :class="{ active: authTab === 'forgot' }" @click="switchAuthTab('forgot')">找回密码</button>
         </nav>
+        <div v-if="!registerEnabled" class="password-feedback error">暂时无法注册，有问题请联系管理员</div>
         <template v-if="authTab === 'login'">
           <div class="form-item"><label>手机号或邮箱</label><input v-model.trim="loginForm.identifier" autocomplete="username" placeholder="请输入手机号或邮箱" /></div>
           <div class="form-item"><label>密码</label><input v-model="loginForm.password" type="password" autocomplete="current-password" placeholder="请输入密码" @keyup.enter="submitLogin" /></div>
@@ -149,6 +155,7 @@ const loading = ref(Boolean(localStorage.getItem('client_token')))
 const errorMessage = ref('')
 const channelToken = ref(String(route.query.channel || localStorage.getItem('client_channel_token') || ''))
 const authTab = ref('login')
+const registerEnabled = ref(true)
 const loginForm = ref({ identifier: '', password: '' })
 const registerForm = ref({ phone: '', qq: '', email: '', emailCode: '', password: '', confirmPassword: '' })
 const resetForm = ref({ phone: '', email: '', emailCode: '', newPassword: '', confirmPassword: '' })
@@ -254,7 +261,10 @@ async function refreshChannels() {
   }
 }
 
-function switchAuthTab(tab) { authTab.value = tab; authMessage.value = ''; authSuccess.value = false; captchaCode.value = ''; geetestInstance?.reset?.() }
+function switchAuthTab(tab) {
+  if (tab === 'register' && !registerEnabled.value) return authMessage.value = '暂时无法注册，有问题请联系管理员'
+  authTab.value = tab; authMessage.value = ''; authSuccess.value = false; captchaCode.value = ''; geetestInstance?.reset?.()
+}
 
 function submitAuth() {
   if (authTab.value === 'login') return submitLogin()
@@ -308,6 +318,7 @@ async function submitLogin() {
   } finally { authLoading.value = false }
 }
 async function sendCode() {
+  if (!registerEnabled.value) return authMessage.value = '暂时无法注册，有问题请联系管理员'
   authMessage.value = ''
   if (!/^\S+@\S+\.\S+$/.test(registerForm.value.email)) return authMessage.value = '请输入正确的邮箱地址'
   codeLoading.value = true
@@ -345,6 +356,7 @@ async function submitResetPassword() {
   } catch (error) { authMessage.value = error?.message || '密码重置失败' } finally { authLoading.value = false }
 }
 async function submitRegister() {
+  if (!registerEnabled.value) return authMessage.value = '暂时无法注册，有问题请联系管理员'
   authMessage.value = ''; authSuccess.value = false; const form = registerForm.value
   if (Object.values(form).some(value => !value)) return authMessage.value = '请填写完整注册信息'
   if (!/^[\d +\-]{6,20}$/.test(form.phone)) return authMessage.value = '请输入正确的手机号'
@@ -490,8 +502,14 @@ async function downloadAndroidApp() {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   document.title = '客户后台'
+  try {
+    const res = await api.get('/client/public-settings')
+    registerEnabled.value = res.data?.registerEnabled !== false
+    if (!registerEnabled.value && authTab.value === 'register') authTab.value = 'login'
+  } catch (_) {}
+
   window.addEventListener('pointerdown', unlockNotificationSound, { once: true })
   window.addEventListener('keydown', unlockNotificationSound, { once: true })
   if (localStorage.getItem('client_token')) loadAccount(); else loadCaptcha()

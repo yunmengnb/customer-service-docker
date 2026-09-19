@@ -6,9 +6,9 @@ import ConfirmDialog from '../../components/ConfirmDialog.vue'
 
 const employees = ref([])
 const showCreate = ref(false)
-const createForm = ref({ username: '', displayName: '', password: '', role: 'agent' })
+const createForm = ref({ username: '', email: '', displayName: '', password: '', role: 'agent' })
 const editTarget = ref(null)
-const editForm = ref({ username: '', displayName: '', role: 'agent' })
+const editForm = ref({ username: '', email: '', displayName: '', role: 'agent' })
 const resetTarget = ref(null)
 const resetPwd = ref('')
 const deleteTarget = ref(null)
@@ -26,14 +26,14 @@ async function createEmployee() {
   const res = await api.post('/tenant/employees', createForm.value)
   if (res.code === 0) {
     showCreate.value = false
-    createForm.value = { username: '', displayName: '', password: '', role: 'agent' }
+    createForm.value = { username: '', email: '', displayName: '', password: '', role: 'agent' }
     await load()
   } else alert(res.message)
 }
 
 function openEdit(employee) {
   editTarget.value = employee
-  editForm.value = { username: employee.username, displayName: employee.displayName, role: employee.role }
+  editForm.value = { username: employee.username, email: employee.email || '', displayName: employee.displayName, role: employee.role }
 }
 
 async function saveEmployee() {
@@ -87,10 +87,10 @@ onMounted(load)
   <div class="page-content">
     <div class="page-title"><span>员工管理</span><button @click="showCreate = true">+ 新增员工</button></div>
     <table class="data-table">
-      <thead><tr><th>用户名</th><th>显示名</th><th>角色</th><th>状态</th><th>最后登录</th><th>操作</th></tr></thead>
+      <thead><tr><th>用户名</th><th>邮箱</th><th>显示名</th><th>角色</th><th>状态</th><th>最后登录</th><th>操作</th></tr></thead>
       <tbody>
         <tr v-for="employee in employees" :key="employee._id">
-          <td>{{ employee.username }}</td><td>{{ employee.displayName }}</td>
+          <td>{{ employee.username }}</td><td>{{ employee.email || '—' }}</td><td>{{ employee.displayName }}</td>
           <td><span class="tag" :class="{ 'tag-blue': employee.role === 'owner', 'tag-green': employee.role === 'admin', 'tag-gray': employee.role === 'agent' }">{{ { owner: '所有者', admin: '管理员', agent: '员工' }[employee.role] }}</span></td>
           <td><span class="tag" :class="employee.status === 'active' ? 'tag-green' : 'tag-red'">{{ employee.status === 'active' ? '正常' : '已禁用' }}</span></td>
           <td>{{ employee.lastLoginAt ? new Date(employee.lastLoginAt).toLocaleString() : '—' }}</td>
@@ -111,6 +111,7 @@ onMounted(load)
     <div v-if="showCreate" class="modal-overlay" @click.self="showCreate = false"><div class="modal-box">
       <h3>新增员工</h3>
       <div class="form-group"><label>用户名</label><input v-model="createForm.username" /></div>
+      <div class="form-group"><label>邮箱（可选）</label><input v-model.trim="createForm.email" type="email" /></div>
       <div class="form-group"><label>显示名</label><input v-model="createForm.displayName" /></div>
       <div class="form-group"><label>初始密码（至少6位）</label><input type="password" v-model="createForm.password" /></div>
       <div class="form-group"><label>角色</label><select v-model="createForm.role"><option value="agent">员工</option><option value="admin">管理员</option></select></div>
@@ -120,6 +121,7 @@ onMounted(load)
     <div v-if="editTarget" class="modal-overlay" @click.self="editTarget = null"><div class="modal-box">
       <h3>编辑员工</h3>
       <div class="form-group"><label>用户名</label><input v-model="editForm.username" /></div>
+      <div class="form-group"><label>邮箱（可选）</label><input v-model.trim="editForm.email" type="email" /></div>
       <div class="form-group"><label>显示名</label><input v-model="editForm.displayName" /></div>
       <div v-if="editTarget.role !== 'owner'" class="form-group"><label>角色</label><select v-model="editForm.role"><option value="agent">员工</option><option value="admin">管理员</option></select></div>
       <div class="modal-footer"><button class="btn-ghost" @click="editTarget = null">取消</button><button class="btn-primary" @click="saveEmployee">保存</button></div>

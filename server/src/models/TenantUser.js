@@ -15,6 +15,12 @@ const TenantUserSchema = new mongoose.Schema({
     minlength: 3,
     maxlength: 50,
   },
+  email: {
+    type: String,
+    trim: true,
+    lowercase: true,
+    default: undefined,
+  },
   password: {
     type: String,
     required: true,
@@ -47,8 +53,9 @@ const TenantUserSchema = new mongoose.Schema({
   versionKey: false,
 });
 
-// 同一租户内 username 唯一
+// 同一租户内 username 唯一；非空员工邮箱全局唯一
 TenantUserSchema.index({ tenantId: 1, username: 1 }, { unique: true });
+TenantUserSchema.index({ email: 1 }, { unique: true, partialFilterExpression: { email: { $type: 'string', $gt: '' } } });
 
 TenantUserSchema.methods.toJSON = function() {
   const obj = this.toObject();

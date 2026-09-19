@@ -21,7 +21,7 @@ const {
   jwtDecodeHeader,
   jwtVerifyHS256,
 } = require('../middleware/integrationAuth');
-const { hashPassword, signToken, generateToken } = require('../utils');
+const { hashPassword, signToken, generateToken, passwordVersion } = require('../utils');
 
 function genHex(len) {
   return crypto.randomBytes(Math.ceil(len / 2)).toString('hex').slice(0, len);
@@ -243,9 +243,17 @@ const IntegrationController = {
       if (user) {
         return res.status(409).json({ code: 409002, msg: '该商户账号已被客服企业中的其他用户占用，请先修改冲突账号', data: null });
       } else {
+        const [emailTenant, emailUser] = await Promise.all([
+          Tenant.exists({ email }),
+          TenantUser.exists({ email }),
+        ]);
+        if (emailTenant || emailUser) {
+          return res.status(409).json({ code: 409003, msg: '该邮箱已被使用', data: null });
+        }
         user = await TenantUser.create({
           tenantId: tenant._id,
           username,
+          email,
           displayName: String(body.display_name || body.displayName || username).slice(0, 50),
           password: await hashPassword(password),
           role: 'agent',
@@ -411,6 +419,68 @@ const IntegrationController = {
     const result = ObjectId.isValid(req.params.itemId) ? await QuickReply.deleteOne({ _id: req.params.itemId, tenantId: req.integration.tenantId, channelId: binding.channelId }) : { deletedCount: 0 };
     if (!result.deletedCount) return res.status(404).json({ code: 404001, msg: 'Quick reply not found', data: null });
     await invalidateChannelCaches(binding); return res.json({ code: 200, msg: 'deleted', data: null });
+  },
+
+  async employeeTokenLogin(req, res) {
+    const token = String(req.body?.token || '').trim();
+    if (!token) return res.status(401).json({ code: 401001, msg: 'Missing employee login token', data: null });
+    const header = jwtDecodeHeader(token);
+    const keyId = header && String(header.kid || '').trim();
+    if (!keyId || header.alg !== 'HS256' || header.typ !== 'JWT') return res.status(401).json({ code: 401002, msg: 'Invalid employee login token header', data: null });
+    const connection = await TenantIntegration.findOne({ keyId, provider: 'jingpro', enabled: true }).select('+platformSecret').exec();
+    if (!connection?.platformSecret) return res.status(401).json({ code: 401003, msg: 'Unknown or disabled integration key', data: null });
+    const payload = jwtVerifyHS256(token, connection.platformSecret);
+    if (!payload) return res.status(401).json({ code: 401003, msg: 'Invalid employee login token signature', data: null });
+    const now = Math.floor(Date.now() / 1000);
+    const issuedAt = payload.iat;
+    const expiresAt = payload.exp;
+    const tenantId = String(payload.tenant_id || '');
+    const employeeUserId = String(payload.employee_user_id || '');
+    const jingproUserId = String(payload.jingpro_user_id || '');
+    if (!Number.isInteger(issuedAt) || !Number.isInteger(expiresAt)
+      || issuedAt > now + 30 || expiresAt <= now || expiresAt <= issuedAt || expiresAt - issuedAt > 120
+      || String(payload.sub || '') !== 'employee-login' || String(payload.aud || '') !== 'kefu-employee-login'
+      || String(payload.iss || '') !== `jingpro:${keyId}` || String(payload.connection_id || '') !== keyId
+      || tenantId !== String(connection.tenantId) || !jingproUserId || !employeeUserId || !String(payload.jti || '').trim()
+      || !ObjectId.isValid(tenantId) || !ObjectId.isValid(employeeUserId)) {
+      return res.status(401).json({ code: 401004, msg: 'Invalid or expired employee login token claims', data: null });
+    }
+    try {
+      await consumeJti(String(payload.jti), connection._id, Math.max(1000, (expiresAt - now) * 1000));
+    } catch (e) {
+      if (e?.code === 40102) return res.status(401).json({ code: 40102, msg: 'Employee login token already used', data: null });
+      return res.status(500).json({ code: 500005, msg: 'JTI store error', data: null });
+    }
+    const binding = await IntegrationBinding.findOne({
+      connectionId: connection._id,
+      tenantId: connection.tenantId,
+      jingproUserId,
+      ownerUserId: employeeUserId,
+    }).exec();
+    if (!binding) return res.status(401).json({ code: 401008, msg: 'No matching linked employee found', data: null });
+    const [user, tenant, channel] = await Promise.all([
+      TenantUser.findById(employeeUserId),
+      Tenant.findById(tenantId),
+      Channel.findOne({ _id: binding.channelId, tenantId, agentIds: employeeUserId }).select('_id').lean(),
+    ]);
+    if (!userAvailable(user, binding) || user.role !== 'agent' || !tenantAvailable(tenant) || !channel) {
+      return res.status(401).json({ code: 401009, msg: 'Linked employee, tenant or channel is unavailable', data: null });
+    }
+    user.lastLoginAt = new Date();
+    await Promise.all([
+      user.save(),
+      TenantIntegration.updateOne({ _id: connection._id }, { $set: { lastUsedAt: new Date() } }),
+    ]);
+    const realToken = signToken({
+      type: 'tenant_user',
+      id: String(user._id),
+      tenantId,
+      username: user.username,
+      displayName: user.displayName,
+      role: user.role,
+      pv: passwordVersion(user.password),
+    });
+    return res.json({ code: 200, msg: 'ok', data: { token: realToken, user: sanitize(user), tenant: sanitize(tenant), redirect: '/messages' } });
   },
 
   async ssoLogin(req, res) {

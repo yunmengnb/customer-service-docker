@@ -5,6 +5,22 @@ const Channel = require('../models/Channel');
 const Conversation = require('../models/Conversation');
 const cache = require('../utils/cache');
 
+function normalizedEmail(value) {
+  const email = String(value || '').trim().toLowerCase();
+  return email || undefined;
+}
+
+async function emailInUse(email, excludeUserId) {
+  if (!email) return false;
+  const userQuery = { email };
+  if (excludeUserId) userQuery._id = { $ne: excludeUserId };
+  const [tenant, user] = await Promise.all([
+    Tenant.exists({ email }),
+    TenantUser.exists(userQuery),
+  ]);
+  return !!(tenant || user);
+}
+
 async function releaseEmployee(req, user) {
   const tenantId = req.tenantId;
   const channels = await Channel.find({ tenantId, agentIds: user._id }).select('publicToken');
@@ -54,6 +70,7 @@ class AgentController {
     const { password, role = 'agent' } = req.body;
     const username = req.body.username.trim();
     const displayName = req.body.displayName.trim();
+    const emailAddress = normalizedEmail(req.body.email);
     
     // 数量限制
     const tenant = await Tenant.findById(tenantId);
@@ -69,19 +86,21 @@ class AgentController {
     if (await TenantUser.findOne({ tenantId, username })) {
       return error(res, '用户名已存在');
     }
+    if (await emailInUse(emailAddress)) return error(res, '邮箱已被使用', 409, 409);
     
     let user;
     try {
       user = await TenantUser.create({
       tenantId,
       username,
+      email: emailAddress,
       password: hashPassword(password),
       displayName,
       role,
       status: req.body.status || 'active',
       });
     } catch (err) {
-      if (err?.code === 11000) return error(res, '用户名已存在', 409, 409);
+      if (err?.code === 11000) return error(res, emailAddress ? '用户名或邮箱已存在' : '用户名已存在', 409, 409);
       throw err;
     }
     
@@ -107,6 +126,11 @@ class AgentController {
       }
       user.username = username;
     }
+    if (req.body.email !== undefined) {
+      const emailAddress = normalizedEmail(req.body.email);
+      if (await emailInUse(emailAddress, user._id)) return error(res, '邮箱已被使用', 409, 409);
+      user.email = emailAddress;
+    }
     if (req.body.displayName !== undefined) user.displayName = req.body.displayName;
     if (req.body.role !== undefined && ['admin', 'agent'].includes(req.body.role)) user.role = req.body.role;
     if (req.body.status !== undefined && ['active', 'disabled'].includes(req.body.status)) user.status = req.body.status;
@@ -115,7 +139,7 @@ class AgentController {
     try {
       await user.save();
     } catch (err) {
-      if (err?.code === 11000) return error(res, '用户名已存在', 409, 409);
+      if (err?.code === 11000) return error(res, '用户名或邮箱已存在', 409, 409);
       throw err;
     }
     if (user.status === 'disabled') await releaseEmployee(req, user);

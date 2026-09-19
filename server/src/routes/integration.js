@@ -34,6 +34,7 @@ router.patch('/channels/:channelId/quick-replies/:itemId', integrationAuth, Inte
 router.delete('/channels/:channelId/quick-replies/:itemId', integrationAuth, IntegrationController.deleteQuickReply);
 
 // 浏览器使用 JWT 登录，不要求浏览器持有平台 HMAC 密钥。
+router.post('/employee-token-login', IntegrationController.employeeTokenLogin);
 router.post('/sso-login', IntegrationController.ssoLogin);
 
 // ===== 平台管理员设置（需要超级管理员）=====

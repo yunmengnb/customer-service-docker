@@ -110,7 +110,7 @@ const tenantPassword = [
 
 // 租户用户登录
 const tenantLogin = [
-  body('username').trim().notEmpty().withMessage('用户名不能为空'),
+  body('username').trim().notEmpty().withMessage('用户名或邮箱不能为空'),
   body('password').notEmpty().withMessage('密码不能为空'),
   body('tenant').optional({ checkFalsy: true }).trim().isLength({ max: 100 }).withMessage('租户标识格式不正确'),
   validate,
@@ -124,6 +124,7 @@ function employeeFields(partial = false) {
       if (partial) chain.optional();
       return chain.isString().bail().trim().isLength({ min, max });
     }),
+    body('email').optional({ values: 'falsy' }).isString().bail().trim().normalizeEmail().isEmail().withMessage('邮箱格式不正确'),
     body('role').optional().isString().bail().isIn(['admin', 'agent']),
     body('status').optional().isString().bail().isIn(['active', 'disabled']),
     body('avatarUrl').optional().isString(),

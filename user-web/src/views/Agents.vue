@@ -6,7 +6,7 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 const agents = ref([])
 const showCreate = ref(false)
-const createForm = ref({ username: '', displayName: '', password: '', role: 'agent' })
+const createForm = ref({ username: '', email: '', displayName: '', password: '', role: 'agent' })
 const resetTarget = ref(null)
 const resetPwd = ref('')
 const deleteTarget = ref(null)
@@ -23,7 +23,7 @@ async function createAgent() {
   const res = await api.post('/tenant/employees', createForm.value)
   if (res.code === 0) {
     showCreate.value = false
-    createForm.value = { username: '', displayName: '', password: '', role: 'agent' }
+    createForm.value = { username: '', email: '', displayName: '', password: '', role: 'agent' }
     await load()
   } else {
     alert(res.message)
@@ -60,10 +60,11 @@ onMounted(load)
     </div>
     
     <table class="data-table">
-      <thead><tr><th>用户名</th><th>显示名</th><th>角色</th><th>状态</th><th>最后登录</th><th>操作</th></tr></thead>
+      <thead><tr><th>用户名</th><th>邮箱</th><th>显示名</th><th>角色</th><th>状态</th><th>最后登录</th><th>操作</th></tr></thead>
       <tbody>
         <tr v-for="a in agents" :key="a._id">
           <td>{{ a.username }}</td>
+          <td>{{ a.email || '—' }}</td>
           <td>{{ a.displayName }}</td>
           <td>
             <span class="tag" :class="{ 'tag-blue': a.role === 'owner', 'tag-green': a.role === 'admin', 'tag-gray': a.role === 'agent' }">
@@ -92,6 +93,7 @@ onMounted(load)
       <div class="modal-box">
         <h3>新增员工</h3>
         <div class="form-group"><label>用户名</label><input v-model="createForm.username" /></div>
+        <div class="form-group"><label>邮箱（可选）</label><input v-model.trim="createForm.email" type="email" /></div>
         <div class="form-group"><label>显示名</label><input v-model="createForm.displayName" /></div>
         <div class="form-group"><label>初始密码（至少6位）</label><input type="password" v-model="createForm.password" /></div>
         <div class="form-group">

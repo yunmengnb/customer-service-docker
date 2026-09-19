@@ -1,6 +1,6 @@
 <!-- 忆梦云团队开发 -->
 <script setup>
-import { onBeforeUnmount, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '../api'
 import AuthCaptcha from '../components/AuthCaptcha.vue'
@@ -9,6 +9,8 @@ const router = useRouter()
 const form = ref({ name: '', username: '', email: '', emailCode: '', password: '', confirmPassword: '' })
 const captcha = ref(null)
 const agreed = ref(false)
+const registerEnabled = ref(true)
+const settingsLoaded = ref(false)
 const err = ref('')
 const loading = ref(false)
 const sendingCode = ref(false)
@@ -22,6 +24,7 @@ function showToast(message, type = 'success') {
 }
 
 async function sendCode() {
+  if (!registerEnabled.value) return showToast('暂时无法注册，有问题请联系管理员', 'error')
   if (sendingCode.value) return
   err.value = ''
   if (!/^\S+@\S+\.\S+$/.test(form.value.email)) {
@@ -40,9 +43,18 @@ async function sendCode() {
   }
 }
 
+onMounted(async () => {
+  try {
+    const res = await api.get('/tenant/public-settings')
+    registerEnabled.value = res.data?.registerEnabled !== false
+  } finally {
+    settingsLoaded.value = true
+  }
+})
 onBeforeUnmount(() => clearTimeout(toastTimer))
 
 async function doRegister() {
+  if (!registerEnabled.value) return err.value = '暂时无法注册，有问题请联系管理员'
   if (loading.value) return
   err.value = ''
   const f = form.value
@@ -80,6 +92,8 @@ async function doRegister() {
     <div class="simple-box">
       <h1>注册客服后台</h1>
       <div class="sub">加入客服系统，开始与客户沟通</div>
+      <div v-if="settingsLoaded && !registerEnabled" class="err">暂时无法注册，有问题请联系管理员</div>
+      <template v-if="registerEnabled">
       <input v-model.trim="form.name" autocomplete="organization" placeholder="企业名称" />
       <input v-model.trim="form.username" autocomplete="username" placeholder="登录用户名" />
       <input v-model.trim="form.email" type="email" autocomplete="email" placeholder="邮箱" />
@@ -98,6 +112,7 @@ async function doRegister() {
       <button type="button" @click="doRegister" :disabled="loading">
         {{ loading ? '注册中...' : '注册' }}
       </button>
+      </template>
       <div class="link-row">
         已有账号？<router-link to="/login">返回登录</router-link>
       </div>

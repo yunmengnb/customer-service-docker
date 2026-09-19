@@ -338,10 +338,11 @@
         <template v-else>
         <div v-if="isGuest" class="guest-bind-notice">当前为访客身份，登录或注册会将本次聊天记录绑定到客户账号。</div>
         <div class="auth-tabs">
-          <button type="button" :class="{ active: authTab === 'register' }" @click="switchAuthTab('register')">注册</button>
+          <button v-if="registerEnabled" type="button" :class="{ active: authTab === 'register' }" @click="switchAuthTab('register')">注册</button>
           <button type="button" :class="{ active: authTab === 'login' }" @click="switchAuthTab('login')">登录</button>
           <button type="button" :class="{ active: authTab === 'forgot' }" @click="switchAuthTab('forgot')">找回密码</button>
         </div>
+        <div v-if="!registerEnabled" class="login-error">暂时无法注册，有问题请联系管理员</div>
         <template v-if="authTab === 'register'">
           <div class="modal-desc">注册账号后即可开始咨询</div>
           <div class="auth-form-grid">
@@ -568,6 +569,7 @@ const isCustomerAndroidApp = /YiMengCustomerAndroid\/[\w.-]+/i.test(userAgent)
 const appDownloadLoading = ref(false)
 const appDownloadError = ref('')
 const authTab = ref('register')
+const registerEnabled = ref(true)
 const loginForm = ref({ identifier: '', password: '' })
 const registerForm = ref({ phone: '', qq: '', email: '', emailCode: '', password: '', confirmPassword: '' })
 const agreed = ref(false)
@@ -926,6 +928,7 @@ async function loadMe() {
 }
 
 function switchAuthTab(tab) {
+  if (tab === 'register' && !registerEnabled.value) return loginErr.value = '暂时无法注册，有问题请联系管理员'
   authTab.value = tab
   loginErr.value = ''
   captchaCode.value = ''
@@ -982,6 +985,7 @@ async function completeAuth(res) {
 }
 
 async function sendRegisterCode() {
+  if (!registerEnabled.value) return loginErr.value = '暂时无法注册，有问题请联系管理员'
   loginErr.value = ''
   if (!/^\S+@\S+\.\S+$/.test(registerForm.value.email)) {
     loginErr.value = '请输入正确的邮箱地址'
@@ -1065,6 +1069,7 @@ async function doLogin() {
 }
 
 async function doRegister() {
+  if (!registerEnabled.value) return loginErr.value = '暂时无法注册，有问题请联系管理员'
   loginErr.value = ''
   const form = registerForm.value
   if (!form.phone || !form.qq || !form.email || !form.emailCode || !form.password || !form.confirmPassword) {
@@ -2147,7 +2152,7 @@ function handleMessageEnter(event) {
 async function sendMessage() {
   if (!inputText.value.trim() || sending.value || uploading.value) return
   sending.value = true
-  
+
   const clientMessageId = 'c_' + Date.now()
   const localMsg = {
     _id: 'temp_' + Date.now(),
@@ -2161,7 +2166,7 @@ async function sendMessage() {
   inputText.value = ''
   await nextTick()
   scrollToBottom()
-  
+
   try {
     const res = await api.post('/client/conversation/messages', {
       content: text,
@@ -2412,7 +2417,12 @@ function generateFingerprint() {
   return btoa(raw)
 }
 
-onMounted(() => {
+onMounted(async () => {
+  try {
+    const res = await api.get('/client/public-settings')
+    registerEnabled.value = res.data?.registerEnabled !== false
+    if (!registerEnabled.value && authTab.value === 'register') authTab.value = 'login'
+  } catch (_) {}
   window.addEventListener('yimeng-native-attachment', handleNativeAttachment)
   window.addEventListener('pointerdown', unlockNotificationSound, { once: true })
   window.addEventListener('keydown', unlockNotificationSound, { once: true })

@@ -358,7 +358,7 @@ class CustomerAuthController {
     const settings = await getSystemSettings();
     if (!settings.registerEnabled) {
       reportRegisterDebug('register-code-result', { entryType: 'account', resultStatus: 'registration-disabled', httpCode: 403, cacheHitCategory: 'not-checked' });
-      return error(res, '系统暂未开放注册', 4034, 403);
+      return error(res, '暂时无法注册，有问题请联系管理员', 4034, 403);
     }
     const email = String(req.body.email).trim().toLowerCase();
     if (await CustomerAccount.exists({ email })) {
@@ -392,7 +392,7 @@ class CustomerAuthController {
   // POST /api/client/auth/register
   async accountRegister(req, res) {
     const settings = await getSystemSettings();
-    if (!settings.registerEnabled) return error(res, '系统暂未开放注册', 4034, 403);
+    if (!settings.registerEnabled) return error(res, '暂时无法注册，有问题请联系管理员', 4034, 403);
     if (req.body.agreementAccepted !== true) return error(res, '请先阅读并同意免责协议和使用协议', 4001, 400);
     const phone = normalizePhone(req.body.phone);
     const email = String(req.body.email).trim().toLowerCase();
@@ -473,7 +473,7 @@ class CustomerAuthController {
     const settings = await getSystemSettings();
     if (!settings.registerEnabled) {
       reportRegisterDebug('register-code-result', { entryType: 'channel', resultStatus: 'registration-disabled', httpCode: 403, cacheHitCategory: 'not-checked' });
-      return error(res, '系统暂未开放注册', 4034, 403);
+      return error(res, '暂时无法注册，有问题请联系管理员', 4034, 403);
     }
 
     const email = String(req.body.email).trim().toLowerCase();
@@ -515,7 +515,7 @@ class CustomerAuthController {
     const channel = await getChannelByToken(req.params.token);
     if (!channel) return error(res, '客服链接无效或已过期', 404, 404);
     const settings = await getSystemSettings();
-    if (!settings.registerEnabled) return error(res, '系统暂未开放注册', 4034, 403);
+    if (!settings.registerEnabled) return error(res, '暂时无法注册，有问题请联系管理员', 4034, 403);
     if (req.body.agreementAccepted !== true) return error(res, '请先阅读并同意免责协议和使用协议', 4001, 400);
 
     const phone = normalizePhone(req.body.phone);

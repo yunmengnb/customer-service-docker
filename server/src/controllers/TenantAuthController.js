@@ -7,6 +7,19 @@ const { getSystemSettings } = require('../utils/systemSettings');
 const { normalizeEmail, sendEmailCode, verifyEmailCode } = require('../utils/emailVerification');
 const { recordLogin, recordOperation } = require('../services/auditLogService');
 
+const REGISTER_DISABLED_MESSAGE = '暂时无法注册，有问题请联系管理员';
+
+async function emailInUse(email, excludeTenantId) {
+  if (!email) return false;
+  const tenantQuery = { email };
+  if (excludeTenantId) tenantQuery._id = { $ne: excludeTenantId };
+  const [tenant, user] = await Promise.all([
+    Tenant.exists(tenantQuery),
+    TenantUser.exists({ email }),
+  ]);
+  return !!(tenant || user);
+}
+
 function ownerToken(user) {
   return signToken({
     type: 'tenant_user',
@@ -30,9 +43,9 @@ function requireOwner(req, res) {
 class TenantAuthController {
   async sendRegisterCode(req, res) {
     const settings = await getSystemSettings();
-    if (!settings.registerEnabled) return error(res, '系统暂未开放注册', 4034, 403);
+    if (!settings.registerEnabled) return error(res, REGISTER_DISABLED_MESSAGE, 4034, 403);
     const email = normalizeEmail(req.body.email);
-    if (await Tenant.exists({ email })) return error(res, '邮箱已被注册');
+    if (await emailInUse(email)) return error(res, '邮箱已被注册');
     const result = await sendEmailCode({ scope: 'tenant-register', email, subject: '租户注册邮箱验证码', action: '租户注册' });
     if (!result.ok) return error(res, result.message, result.code, result.status);
     return ok(res, null, '验证码已发送');
@@ -42,13 +55,13 @@ class TenantAuthController {
     const { name, username, password } = req.body;
     const email = normalizeEmail(req.body.email);
     const settings = await getSystemSettings();
-    if (!settings.registerEnabled) return error(res, '系统暂未开放注册', 4034, 403);
+    if (!settings.registerEnabled) return error(res, REGISTER_DISABLED_MESSAGE, 4034, 403);
     if (settings.tenantRegisterEmailVerificationEnabled) {
       const valid = await verifyEmailCode({ scope: 'tenant-register', email, code: req.body.emailCode });
       if (!valid) return error(res, '邮箱验证码错误或已过期', 4004, 400);
     }
     if (await Tenant.exists({ username })) return error(res, '用户名已被注册');
-    if (await Tenant.exists({ email })) return error(res, '邮箱已被注册');
+    if (await emailInUse(email)) return error(res, '邮箱已被注册');
 
     const passwordHash = hashPassword(password);
     let tenant;
@@ -77,8 +90,12 @@ class TenantAuthController {
       if (!specifiedTenant) return error(res, '租户账号或标识不存在', 4041, 404);
     }
 
-    const ownerTenant = specifiedTenant || await Tenant.findOne({ username });
-    if (ownerTenant && ownerTenant.username === username && comparePassword(password, ownerTenant.password)) {
+    const loginEmail = normalizeEmail(username);
+    const isEmailLogin = /^\S+@\S+\.\S+$/.test(loginEmail);
+    const ownerTenant = specifiedTenant
+      ? (specifiedTenant.username === username || specifiedTenant.email === loginEmail ? specifiedTenant : null)
+      : await Tenant.findOne(isEmailLogin ? { email: loginEmail } : { username });
+    if (ownerTenant && (ownerTenant.username === username || ownerTenant.email === loginEmail) && comparePassword(password, ownerTenant.password)) {
       if (!['active', 'trial'].includes(ownerTenant.status)) {
         recordLogin({ req, tenantId: ownerTenant._id, user: { username, displayName: ownerTenant.name, role: 'owner' }, result: 'failure', detail: '账号已被禁用' });
         return error(res, '账号已被禁用', 403, 403);
@@ -94,10 +111,10 @@ class TenantAuthController {
       return ok(res, { token: ownerToken(owner), tenant: ownerTenant.toJSON(), user: owner.toJSON() });
     }
 
-    const userQuery = { username };
+    const userQuery = isEmailLogin ? { email: loginEmail } : { username };
     if (specifiedTenant) userQuery.tenantId = specifiedTenant._id;
     const users = await TenantUser.find(userQuery).limit(2);
-    if (!specifiedTenant && users.length > 1) {
+    if (!specifiedTenant && !isEmailLogin && users.length > 1) {
       return error(res, '该用户名属于多个租户，请提供租户账号或标识', 4092, 409);
     }
     const user = users[0];
@@ -160,7 +177,7 @@ class TenantAuthController {
     if (!tenant) return error(res, '租户不存在', 404, 404);
     const purpose = req.body.purpose;
     const email = purpose === 'change-email' ? normalizeEmail(req.body.email) : tenant.email;
-    if (purpose === 'change-email' && await Tenant.exists({ email, _id: { $ne: tenant._id } })) return error(res, '邮箱已被使用');
+    if (purpose === 'change-email' && await emailInUse(email, tenant._id)) return error(res, '邮箱已被使用');
     const result = await sendEmailCode({ scope: `tenant-profile:${tenant._id}:${purpose}`, email, subject: '租户资料安全验证码', action: purpose === 'change-email' ? '修改邮箱' : '修改密码' });
     if (!result.ok) return error(res, result.message, result.code, result.status);
     return ok(res, null, '验证码已发送');
@@ -169,7 +186,7 @@ class TenantAuthController {
   async updateEmail(req, res) {
     if (!requireOwner(req, res)) return;
     const email = normalizeEmail(req.body.email);
-    if (await Tenant.exists({ email, _id: { $ne: req.tenantId } })) return error(res, '邮箱已被使用');
+    if (await emailInUse(email, req.tenantId)) return error(res, '邮箱已被使用');
     const valid = await verifyEmailCode({ scope: `tenant-profile:${req.tenantId}:change-email`, email, code: req.body.emailCode });
     if (!valid) return error(res, '邮箱验证码错误或已过期', 4004, 400);
     const tenant = await Tenant.findByIdAndUpdate(req.tenantId, { email }, { new: true, runValidators: true });

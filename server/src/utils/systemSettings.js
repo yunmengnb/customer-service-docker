@@ -36,6 +36,7 @@ function publicWebsiteSettings(setting) {
     siteTitle: setting.siteTitle || '忆梦云客服',
     siteKeywords: setting.siteKeywords || '',
     siteDescription: setting.siteDescription || '',
+    registerEnabled: setting.registerEnabled !== false,
     tenantRegisterEmailVerificationEnabled: Boolean(setting.tenantRegisterEmailVerificationEnabled),
     agreements: {
       disclaimer: setting.agreements?.disclaimer || '',

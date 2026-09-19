@@ -4,7 +4,7 @@
 
 ## 一键安装
 
-将本目录发布到可通过 HTTP/HTTPS 下载的位置，并保证同目录提供源码包 `kf-docker.tar.gz`。然后在 Linux 服务器执行：
+在 Linux 服务器中使用 GitHub 地址执行一键安装：
 
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/yunmengnb/customer-service-docker/main/install.sh)
@@ -36,13 +36,18 @@ chmod +x build-package.sh
 ./build-package.sh
 ```
 
-会生成 `kf-docker.tar.gz`。将它和 `install.sh` 上传到同一个 URL 目录即可。
+会生成 `kf-docker.tar.gz`。本项目默认使用 GitHub `main` 分支中的安装脚本和安装包：
 
-也可显式指定安装包地址：
+```text
+https://raw.githubusercontent.com/yunmengnb/customer-service-docker/main/install.sh
+https://raw.githubusercontent.com/yunmengnb/customer-service-docker/main/kf-docker.tar.gz
+```
+
+如需显式指定 GitHub 安装包地址：
 
 ```bash
-KF_PACKAGE_URL=https://example.com/download/kf-docker.tar.gz \
-bash <(curl -Ls https://example.com/download/install.sh)
+KF_PACKAGE_URL=https://raw.githubusercontent.com/yunmengnb/customer-service-docker/main/kf-docker.tar.gz \
+bash <(curl -Ls https://raw.githubusercontent.com/yunmengnb/customer-service-docker/main/install.sh)
 ```
 
 ## 管理菜单

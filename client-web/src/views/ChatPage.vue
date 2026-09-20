@@ -339,9 +339,10 @@
         <div v-if="isGuest" class="guest-bind-notice">当前为访客身份，登录或注册会将本次聊天记录绑定到客户账号。</div>
         <div class="auth-tabs">
           <button v-if="registerEnabled" type="button" :class="{ active: authTab === 'register' }" @click="switchAuthTab('register')">注册</button>
-          <button type="button" :class="{ active: authTab === 'login' }" @click="switchAuthTab('login')">登录</button>
+          <button v-if="loginEnabled" type="button" :class="{ active: authTab === 'login' }" @click="switchAuthTab('login')">登录</button>
           <button type="button" :class="{ active: authTab === 'forgot' }" @click="switchAuthTab('forgot')">找回密码</button>
         </div>
+        <div v-if="!loginEnabled" class="login-error">客户登录暂时关闭，有问题请联系管理员</div>
         <div v-if="!registerEnabled" class="login-error">暂时无法注册，有问题请联系管理员</div>
         <template v-if="authTab === 'register'">
           <div class="modal-desc">注册账号后即可开始咨询</div>
@@ -350,7 +351,7 @@
             <div class="form-item"><label>QQ号</label><input v-model.trim="registerForm.qq" inputmode="numeric" maxlength="12" placeholder="请输入5-12位QQ号" /></div>
           </div>
           <div class="form-item"><label>邮箱</label><input v-model.trim="registerForm.email" type="email" autocomplete="email" placeholder="请输入邮箱" /></div>
-          <div class="form-item">
+          <div v-if="emailVerificationEnabled" class="form-item">
             <label>邮箱验证码</label>
             <div class="email-code-row">
               <input v-model.trim="registerForm.emailCode" inputmode="numeric" maxlength="6" placeholder="请输入6位验证码" />
@@ -569,7 +570,10 @@ const isCustomerAndroidApp = /YiMengCustomerAndroid\/[\w.-]+/i.test(userAgent)
 const appDownloadLoading = ref(false)
 const appDownloadError = ref('')
 const authTab = ref('register')
+const loginEnabled = ref(true)
 const registerEnabled = ref(true)
+const emailVerificationEnabled = ref(true)
+const clientDownloadPromptEnabled = ref(true)
 const loginForm = ref({ identifier: '', password: '' })
 const registerForm = ref({ phone: '', qq: '', email: '', emailCode: '', password: '', confirmPassword: '' })
 const agreed = ref(false)
@@ -641,8 +645,7 @@ function localDateKey() {
 }
 
 function requestInstallGuide() {
-  if (isGuest.value) return
-  if (!installGuideDismissed && !isCustomerAndroidApp && localStorage.getItem(installGuideDismissedDateKey) !== localDateKey()) {
+  if (clientDownloadPromptEnabled.value && !installGuideDismissed && !isCustomerAndroidApp && localStorage.getItem(installGuideDismissedDateKey) !== localDateKey()) {
     appDownloadError.value = ''
     showInstallGuide.value = true
   }
@@ -928,6 +931,7 @@ async function loadMe() {
 }
 
 function switchAuthTab(tab) {
+  if (tab === 'login' && !loginEnabled.value) return loginErr.value = '客户登录暂时关闭，有问题请联系管理员'
   if (tab === 'register' && !registerEnabled.value) return loginErr.value = '暂时无法注册，有问题请联系管理员'
   authTab.value = tab
   loginErr.value = ''
@@ -937,7 +941,10 @@ function switchAuthTab(tab) {
 
 function chooseCustomerIdentity() {
   authStep.value = 'account'
-  authTab.value = 'login'
+  authTab.value = loginEnabled.value ? 'login' : (registerEnabled.value ? 'register' : 'forgot')
+  if (!loginEnabled.value && !registerEnabled.value) {
+    loginErr.value = '客户登录和注册暂时关闭，可使用找回密码或返回访客咨询'
+  }
   loadCaptcha()
 }
 
@@ -986,6 +993,7 @@ async function completeAuth(res) {
 
 async function sendRegisterCode() {
   if (!registerEnabled.value) return loginErr.value = '暂时无法注册，有问题请联系管理员'
+  if (!emailVerificationEnabled.value) return loginErr.value = '客户注册暂未开启邮箱验证'
   loginErr.value = ''
   if (!/^\S+@\S+\.\S+$/.test(registerForm.value.email)) {
     loginErr.value = '请输入正确的邮箱地址'
@@ -1036,14 +1044,17 @@ async function submitResetPassword() {
   try {
     const res = await api.post('/client/auth/forgot-password/reset', form)
     if (res.code !== 0) throw new Error(res.message)
-    switchAuthTab('login')
-    loginErr.value = res.message || '密码已重置，请使用新密码登录'
+    switchAuthTab(loginEnabled.value ? 'login' : 'forgot')
+    loginErr.value = loginEnabled.value
+      ? (res.message || '密码已重置，请使用新密码登录')
+      : '密码已重置，客户登录当前已关闭'
     loginForm.value.identifier = form.phone
     resetForm.value = { phone: '', email: '', emailCode: '', newPassword: '', confirmPassword: '' }
   } catch (error) { loginErr.value = error?.message || '密码重置失败' } finally { loginLoading.value = false }
 }
 
 async function doLogin() {
+  if (!loginEnabled.value) return loginErr.value = '客户登录暂时关闭，有问题请联系管理员'
   loginErr.value = ''
   if (!loginForm.value.identifier || !loginForm.value.password) {
     loginErr.value = '请填写完整信息'
@@ -1072,7 +1083,8 @@ async function doRegister() {
   if (!registerEnabled.value) return loginErr.value = '暂时无法注册，有问题请联系管理员'
   loginErr.value = ''
   const form = registerForm.value
-  if (!form.phone || !form.qq || !form.email || !form.emailCode || !form.password || !form.confirmPassword) {
+  if (!form.phone || !form.qq || !form.email || !form.password || !form.confirmPassword
+    || (emailVerificationEnabled.value && !form.emailCode)) {
     loginErr.value = '请填写完整注册信息'
     return
   }
@@ -1088,7 +1100,7 @@ async function doRegister() {
     loginErr.value = '请输入正确的邮箱地址'
     return
   }
-  if (!/^\d{6}$/.test(form.emailCode)) {
+  if (emailVerificationEnabled.value && !/^\d{6}$/.test(form.emailCode)) {
     loginErr.value = '请输入6位邮箱验证码'
     return
   }
@@ -2420,8 +2432,12 @@ function generateFingerprint() {
 onMounted(async () => {
   try {
     const res = await api.get('/client/public-settings')
-    registerEnabled.value = res.data?.registerEnabled !== false
-    if (!registerEnabled.value && authTab.value === 'register') authTab.value = 'login'
+    loginEnabled.value = res.data?.customerLoginEnabled !== false
+    registerEnabled.value = res.data?.customerRegisterEnabled !== false
+    emailVerificationEnabled.value = res.data?.customerRegisterEmailVerificationEnabled !== false
+    clientDownloadPromptEnabled.value = res.data?.customerServiceClientDownloadPromptEnabled !== false
+    if (!registerEnabled.value && authTab.value === 'register') authTab.value = loginEnabled.value ? 'login' : 'forgot'
+    else if (!loginEnabled.value && authTab.value === 'login') authTab.value = registerEnabled.value ? 'register' : 'forgot'
   } catch (_) {}
   window.addEventListener('yimeng-native-attachment', handleNativeAttachment)
   window.addEventListener('pointerdown', unlockNotificationSound, { once: true })

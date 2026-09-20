@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const Tenant = require('../models/Tenant');
 const TenantUser = require('../models/TenantUser');
 const { ok, error, hashPassword, comparePassword, signToken, passwordVersion } = require('../utils');
-const { getSystemSettings } = require('../utils/systemSettings');
+const { getSystemSettings, authSettings } = require('../utils/systemSettings');
 const { normalizeEmail, sendEmailCode, verifyEmailCode } = require('../utils/emailVerification');
 const { recordLogin, recordOperation } = require('../services/auditLogService');
 
@@ -42,8 +42,11 @@ function requireOwner(req, res) {
 
 class TenantAuthController {
   async sendRegisterCode(req, res) {
-    const settings = await getSystemSettings();
-    if (!settings.registerEnabled) return error(res, REGISTER_DISABLED_MESSAGE, 4034, 403);
+    const settings = authSettings(await getSystemSettings());
+    if (!settings.tenantRegisterEnabled) return error(res, REGISTER_DISABLED_MESSAGE, 4034, 403);
+    if (!settings.tenantRegisterEmailVerificationEnabled) {
+      return error(res, '客服注册暂未开启邮箱验证', 4035, 403);
+    }
     const email = normalizeEmail(req.body.email);
     if (await emailInUse(email)) return error(res, '邮箱已被注册');
     const result = await sendEmailCode({ scope: 'tenant-register', email, subject: '租户注册邮箱验证码', action: '租户注册' });
@@ -54,8 +57,8 @@ class TenantAuthController {
   async register(req, res) {
     const { name, username, password } = req.body;
     const email = normalizeEmail(req.body.email);
-    const settings = await getSystemSettings();
-    if (!settings.registerEnabled) return error(res, REGISTER_DISABLED_MESSAGE, 4034, 403);
+    const settings = authSettings(await getSystemSettings());
+    if (!settings.tenantRegisterEnabled) return error(res, REGISTER_DISABLED_MESSAGE, 4034, 403);
     if (settings.tenantRegisterEmailVerificationEnabled) {
       const valid = await verifyEmailCode({ scope: 'tenant-register', email, code: req.body.emailCode });
       if (!valid) return error(res, '邮箱验证码错误或已过期', 4004, 400);
@@ -79,8 +82,8 @@ class TenantAuthController {
   async login(req, res) {
     const { username, password } = req.body;
     const tenantIdentifier = String(req.body.tenant || '').trim();
-    const settings = await getSystemSettings();
-    if (!settings.loginEnabled) return error(res, '系统暂时关闭登录', 4034, 403);
+    const settings = authSettings(await getSystemSettings());
+    if (!settings.tenantLoginEnabled) return error(res, '客服登录暂时关闭，有问题请联系管理员', 4034, 403);
 
     let specifiedTenant = null;
     if (tenantIdentifier) {

@@ -15,7 +15,7 @@
           <div><h1>客户账号</h1><p>登录或注册后管理你的客服渠道</p></div>
         </div>
         <nav class="auth-tabs account-auth-tabs">
-          <button type="button" :class="{ active: authTab === 'login' }" @click="switchAuthTab('login')">登录</button>
+          <button v-if="loginEnabled" type="button" :class="{ active: authTab === 'login' }" @click="switchAuthTab('login')">登录</button>
           <button
             v-if="registerEnabled"
             type="button"
@@ -24,6 +24,7 @@
           >注册</button>
           <button type="button" :class="{ active: authTab === 'forgot' }" @click="switchAuthTab('forgot')">找回密码</button>
         </nav>
+        <div v-if="!loginEnabled" class="password-feedback error">客户登录暂时关闭，有问题请联系管理员</div>
         <div v-if="!registerEnabled" class="password-feedback error">暂时无法注册，有问题请联系管理员</div>
         <template v-if="authTab === 'login'">
           <div class="form-item"><label>手机号或邮箱</label><input v-model.trim="loginForm.identifier" autocomplete="username" placeholder="请输入手机号或邮箱" /></div>
@@ -35,7 +36,7 @@
             <div class="form-item"><label>QQ号</label><input v-model.trim="registerForm.qq" inputmode="numeric" maxlength="12" placeholder="请输入5-12位QQ号" /></div>
           </div>
           <div class="form-item"><label>邮箱</label><input v-model.trim="registerForm.email" type="email" autocomplete="email" placeholder="请输入邮箱" /></div>
-          <div class="form-item"><label>邮箱验证码</label><div class="email-code-row"><input v-model.trim="registerForm.emailCode" inputmode="numeric" maxlength="6" placeholder="请输入6位验证码" /><button type="button" :disabled="codeLoading || codeCountdown > 0" @click="sendCode">{{ codeCountdown ? `${codeCountdown}秒后重发` : (codeLoading ? '发送中...' : '发送验证码') }}</button></div></div>
+          <div v-if="emailVerificationEnabled" class="form-item"><label>邮箱验证码</label><div class="email-code-row"><input v-model.trim="registerForm.emailCode" inputmode="numeric" maxlength="6" placeholder="请输入6位验证码" /><button type="button" :disabled="codeLoading || codeCountdown > 0" @click="sendCode">{{ codeCountdown ? `${codeCountdown}秒后重发` : (codeLoading ? '发送中...' : '发送验证码') }}</button></div></div>
           <div class="auth-form-grid">
             <div class="form-item"><label>密码</label><input v-model="registerForm.password" type="password" autocomplete="new-password" placeholder="请输入6-72位密码" /></div>
             <div class="form-item"><label>确认密码</label><input v-model="registerForm.confirmPassword" type="password" autocomplete="new-password" placeholder="请再次输入密码" @keyup.enter="submitRegister" /></div>
@@ -155,7 +156,9 @@ const loading = ref(Boolean(localStorage.getItem('client_token')))
 const errorMessage = ref('')
 const channelToken = ref(String(route.query.channel || localStorage.getItem('client_channel_token') || ''))
 const authTab = ref('login')
+const loginEnabled = ref(true)
 const registerEnabled = ref(true)
+const emailVerificationEnabled = ref(true)
 const loginForm = ref({ identifier: '', password: '' })
 const registerForm = ref({ phone: '', qq: '', email: '', emailCode: '', password: '', confirmPassword: '' })
 const resetForm = ref({ phone: '', email: '', emailCode: '', newPassword: '', confirmPassword: '' })
@@ -262,6 +265,7 @@ async function refreshChannels() {
 }
 
 function switchAuthTab(tab) {
+  if (tab === 'login' && !loginEnabled.value) return authMessage.value = '客户登录暂时关闭，有问题请联系管理员'
   if (tab === 'register' && !registerEnabled.value) return authMessage.value = '暂时无法注册，有问题请联系管理员'
   authTab.value = tab; authMessage.value = ''; authSuccess.value = false; captchaCode.value = ''; geetestInstance?.reset?.()
 }
@@ -308,6 +312,7 @@ async function finishAuth(res) {
   await loadAccount()
 }
 async function submitLogin() {
+  if (!loginEnabled.value) return authMessage.value = '客户登录暂时关闭，有问题请联系管理员'
   authMessage.value = ''
   if (!loginForm.value.identifier || !loginForm.value.password) return authMessage.value = '请填写完整登录信息'
   authLoading.value = true
@@ -319,6 +324,7 @@ async function submitLogin() {
 }
 async function sendCode() {
   if (!registerEnabled.value) return authMessage.value = '暂时无法注册，有问题请联系管理员'
+  if (!emailVerificationEnabled.value) return authMessage.value = '客户注册暂未开启邮箱验证'
   authMessage.value = ''
   if (!/^\S+@\S+\.\S+$/.test(registerForm.value.email)) return authMessage.value = '请输入正确的邮箱地址'
   codeLoading.value = true
@@ -351,18 +357,19 @@ async function submitResetPassword() {
   try {
     const res = await api.post('/client/auth/forgot-password/reset', form)
     if (res.code !== 0) throw new Error(res.message)
-    switchAuthTab('login'); authSuccess.value = true; authMessage.value = res.message || '密码已重置，请使用新密码登录'; loginForm.value.identifier = form.phone
+    switchAuthTab(loginEnabled.value ? 'login' : 'forgot'); authSuccess.value = true; authMessage.value = loginEnabled.value ? (res.message || '密码已重置，请使用新密码登录') : '密码已重置，客户登录当前已关闭'; loginForm.value.identifier = form.phone
     resetForm.value = { phone: '', email: '', emailCode: '', newPassword: '', confirmPassword: '' }
   } catch (error) { authMessage.value = error?.message || '密码重置失败' } finally { authLoading.value = false }
 }
 async function submitRegister() {
   if (!registerEnabled.value) return authMessage.value = '暂时无法注册，有问题请联系管理员'
   authMessage.value = ''; authSuccess.value = false; const form = registerForm.value
-  if (Object.values(form).some(value => !value)) return authMessage.value = '请填写完整注册信息'
+  if (!form.phone || !form.qq || !form.email || !form.password || !form.confirmPassword
+    || (emailVerificationEnabled.value && !form.emailCode)) return authMessage.value = '请填写完整注册信息'
   if (!/^[\d +\-]{6,20}$/.test(form.phone)) return authMessage.value = '请输入正确的手机号'
   if (!/^[1-9]\d{4,11}$/.test(form.qq)) return authMessage.value = '请输入5-12位QQ号'
   if (!/^\S+@\S+\.\S+$/.test(form.email)) return authMessage.value = '请输入正确的邮箱地址'
-  if (!/^\d{6}$/.test(form.emailCode)) return authMessage.value = '请输入6位邮箱验证码'
+  if (emailVerificationEnabled.value && !/^\d{6}$/.test(form.emailCode)) return authMessage.value = '请输入6位邮箱验证码'
   if (form.password.length < 6 || form.password.length > 72) return authMessage.value = '密码须为6-72位'
   if (form.password !== form.confirmPassword) return authMessage.value = '两次输入的密码不一致'
   if (!agreed.value) return authMessage.value = '请先阅读并同意免责协议和使用协议'
@@ -506,8 +513,11 @@ onMounted(async () => {
   document.title = '客户后台'
   try {
     const res = await api.get('/client/public-settings')
-    registerEnabled.value = res.data?.registerEnabled !== false
-    if (!registerEnabled.value && authTab.value === 'register') authTab.value = 'login'
+    loginEnabled.value = res.data?.customerLoginEnabled !== false
+    registerEnabled.value = res.data?.customerRegisterEnabled !== false
+    emailVerificationEnabled.value = res.data?.customerRegisterEmailVerificationEnabled !== false
+    if (!loginEnabled.value && authTab.value === 'login') authTab.value = registerEnabled.value ? 'register' : 'forgot'
+    else if (!registerEnabled.value && authTab.value === 'register') authTab.value = loginEnabled.value ? 'login' : 'forgot'
   } catch (_) {}
 
   window.addEventListener('pointerdown', unlockNotificationSound, { once: true })

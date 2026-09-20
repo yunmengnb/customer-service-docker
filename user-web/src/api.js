@@ -70,9 +70,22 @@ api.interceptors.response.use(
         storage.removeItem('tenant_token')
       }
     }
-    const reason = err.response?.data || err
-    if (reason && typeof reason === 'object') reason.httpStatus = err.response?.status
-    return Promise.reject(reason)
+    const responseData = err.response?.data
+    if (responseData && typeof responseData === 'object') {
+      return Promise.reject({
+        ...responseData,
+        message: responseData.message || responseData.msg || '请求失败',
+        httpStatus: err.response.status,
+        isNetworkError: false,
+      })
+    }
+    const isNetworkError = !err.response
+    return Promise.reject({
+      message: isNetworkError ? '网络错误，请稍后重试' : '请求失败，请稍后重试',
+      code: err.code,
+      httpStatus: err.response?.status,
+      isNetworkError,
+    })
   }
 )
 

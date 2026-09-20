@@ -41,10 +41,20 @@ class SystemSettingController {
     const setting = await SystemSetting.getSingleton();
     const body = req.body || {};
     if (typeof body.registerEnabled === 'boolean') setting.registerEnabled = body.registerEnabled;
-    if (typeof body.tenantRegisterEmailVerificationEnabled === 'boolean') {
-      setting.tenantRegisterEmailVerificationEnabled = body.tenantRegisterEmailVerificationEnabled;
+    for (const key of [
+      'tenantRegisterEnabled',
+      'customerRegisterEnabled',
+      'tenantLoginEnabled',
+      'customerLoginEnabled',
+      'tenantRegisterEmailVerificationEnabled',
+      'customerRegisterEmailVerificationEnabled',
+    ]) {
+      if (typeof body[key] === 'boolean') setting[key] = body[key];
     }
     if (typeof body.loginEnabled === 'boolean') setting.loginEnabled = body.loginEnabled;
+    if (typeof body.customerServiceClientDownloadPromptEnabled === 'boolean') {
+      setting.customerServiceClientDownloadPromptEnabled = body.customerServiceClientDownloadPromptEnabled;
+    }
     if (body.customerServiceDomain !== undefined) {
       const domain = normalizeDomain(body.customerServiceDomain);
       if (domain === null) return error(res, '客服专属域名格式不正确，请仅填写域名和协议');

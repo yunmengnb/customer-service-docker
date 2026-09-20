@@ -17,8 +17,35 @@ function clearSystemSettingsCache() {
   expiresAt = 0;
 }
 
+function authSettings(setting) {
+  const data = setting?.toObject ? setting.toObject() : (setting || {});
+  const legacyRegisterEnabled = data.registerEnabled !== false;
+  const legacyLoginEnabled = data.loginEnabled !== false;
+
+  return {
+    tenantRegisterEnabled: typeof data.tenantRegisterEnabled === 'boolean'
+      ? data.tenantRegisterEnabled
+      : legacyRegisterEnabled,
+    customerRegisterEnabled: typeof data.customerRegisterEnabled === 'boolean'
+      ? data.customerRegisterEnabled
+      : legacyRegisterEnabled,
+    tenantLoginEnabled: typeof data.tenantLoginEnabled === 'boolean'
+      ? data.tenantLoginEnabled
+      : legacyLoginEnabled,
+    customerLoginEnabled: typeof data.customerLoginEnabled === 'boolean'
+      ? data.customerLoginEnabled
+      : legacyLoginEnabled,
+    tenantRegisterEmailVerificationEnabled: Boolean(data.tenantRegisterEmailVerificationEnabled),
+    customerRegisterEmailVerificationEnabled: typeof data.customerRegisterEmailVerificationEnabled === 'boolean'
+      ? data.customerRegisterEmailVerificationEnabled
+      : true,
+  };
+}
+
 function publicSettings(setting) {
   const data = setting.toObject ? setting.toObject() : { ...setting };
+  Object.assign(data, authSettings(data));
+  data.customerServiceClientDownloadPromptEnabled = data.customerServiceClientDownloadPromptEnabled !== false;
   if (data.captcha) {
     data.captcha.geetestKeyConfigured = Boolean(data.captcha.geetestKey);
     delete data.captcha.geetestKey;
@@ -36,8 +63,8 @@ function publicWebsiteSettings(setting) {
     siteTitle: setting.siteTitle || '忆梦云客服',
     siteKeywords: setting.siteKeywords || '',
     siteDescription: setting.siteDescription || '',
-    registerEnabled: setting.registerEnabled !== false,
-    tenantRegisterEmailVerificationEnabled: Boolean(setting.tenantRegisterEmailVerificationEnabled),
+    customerServiceClientDownloadPromptEnabled: setting.customerServiceClientDownloadPromptEnabled !== false,
+    ...authSettings(setting),
     agreements: {
       disclaimer: setting.agreements?.disclaimer || '',
       terms: setting.agreements?.terms || '',
@@ -71,6 +98,7 @@ module.exports = {
   getSystemSettings,
   clearSystemSettingsCache,
   ensureDefaultAgreements,
+  authSettings,
   publicSettings,
   publicWebsiteSettings,
   buildCustomerServiceLink,

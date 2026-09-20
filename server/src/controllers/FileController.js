@@ -137,7 +137,7 @@ async function issuePlayback(req, res) {
     exp: Math.floor(expiresAt / 1000) }, playbackKey, { algorithm: 'HS256', audience: 'attachment-playback' });
   // Same-origin browser Origin covers HTTPS termination without trusting forwarded headers.
   const secure = req.secure || (req.get('origin') === 'https://' + req.get('host'));
-  res.cookie('ym_video', credential, { httpOnly: true, sameSite: 'strict', secure,
+  res.cookie('ym_video', credential, { httpOnly: true, sameSite: secure ? 'none' : 'lax', secure,
     path: url, maxAge: expiresAt - Date.now() });
   return ok(res, { url, expiresAt: Math.floor(expiresAt / 1000) * 1000 });
 }

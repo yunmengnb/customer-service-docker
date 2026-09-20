@@ -17,10 +17,14 @@ const tabs = [
 ]
 
 const defaults = {
-  registerEnabled: true,
+  tenantRegisterEnabled: true,
+  customerRegisterEnabled: true,
+  tenantLoginEnabled: true,
+  customerLoginEnabled: true,
   tenantRegisterEmailVerificationEnabled: false,
-  loginEnabled: true,
+  customerRegisterEmailVerificationEnabled: true,
   customerServiceDomain: '',
+  customerServiceClientDownloadPromptEnabled: true,
   siteTitle: '忆梦云客服',
   siteKeywords: '',
   siteDescription: '',
@@ -92,11 +96,17 @@ function selectTab(tab) {
 
 function applySettings(data) {
   const source = data?.settings || data || {}
-  if (typeof source.registerEnabled === 'boolean') form.registerEnabled = source.registerEnabled
-  if (typeof source.tenantRegisterEmailVerificationEnabled === 'boolean') {
-    form.tenantRegisterEmailVerificationEnabled = source.tenantRegisterEmailVerificationEnabled
+  for (const key of [
+    'tenantRegisterEnabled',
+    'customerRegisterEnabled',
+    'tenantLoginEnabled',
+    'customerLoginEnabled',
+    'tenantRegisterEmailVerificationEnabled',
+    'customerRegisterEmailVerificationEnabled',
+    'customerServiceClientDownloadPromptEnabled',
+  ]) {
+    if (typeof source[key] === 'boolean') form[key] = source[key]
   }
-  if (typeof source.loginEnabled === 'boolean') form.loginEnabled = source.loginEnabled
   if (Array.isArray(source.forbiddenWords)) form.forbiddenWords = source.forbiddenWords.join('\n')
   if (source.agreements) Object.assign(form.agreements, source.agreements)
   for (const key of ['customerServiceDomain', 'siteTitle', 'siteKeywords', 'siteDescription']) {
@@ -553,17 +563,32 @@ onMounted(() => {
         </div>
 
         <div v-else-if="activeTab === 'auth'" class="settings-grid">
+          <h3 class="section-heading full-width">客服端</h3>
           <div class="setting-switch full-width">
-            <div><strong>开放用户注册</strong><span>关闭后新用户无法创建账号，已有账号不受影响。</span></div>
-            <label class="switch"><input v-model="form.registerEnabled" type="checkbox" /><span class="slider"></span></label>
+            <div><strong>客服注册</strong><span>控制客服后台注册入口和服务端客服注册接口。</span></div>
+            <label class="switch"><input v-model="form.tenantRegisterEnabled" type="checkbox" /><span class="slider"></span></label>
           </div>
           <div class="setting-switch full-width">
-            <div><strong>客服后台注册邮箱验证</strong><span>开启后客服后台注册时必须先获取并填写邮箱验证码。</span></div>
+            <div><strong>客服登录</strong><span>控制客服账号、邮箱密码登录及员工临时密钥登录。</span></div>
+            <label class="switch"><input v-model="form.tenantLoginEnabled" type="checkbox" /><span class="slider"></span></label>
+          </div>
+          <div class="setting-switch full-width">
+            <div><strong>客服后台注册邮箱验证</strong><span>开启后客服注册时必须获取并填写邮箱验证码。</span></div>
             <label class="switch"><input v-model="form.tenantRegisterEmailVerificationEnabled" type="checkbox" /><span class="slider"></span></label>
           </div>
+
+          <h3 class="section-heading full-width">客户端</h3>
           <div class="setting-switch full-width">
-            <div><strong>允许用户登录</strong><span>关闭后用户将无法登录平台。</span></div>
-            <label class="switch"><input v-model="form.loginEnabled" type="checkbox" /><span class="slider"></span></label>
+            <div><strong>客户注册</strong><span>同时控制客户后台与客服链接面板的注册入口和接口。</span></div>
+            <label class="switch"><input v-model="form.customerRegisterEnabled" type="checkbox" /><span class="slider"></span></label>
+          </div>
+          <div class="setting-switch full-width">
+            <div><strong>客户登录</strong><span>同时控制客户后台与客服链接面板的登录入口和接口。</span></div>
+            <label class="switch"><input v-model="form.customerLoginEnabled" type="checkbox" /><span class="slider"></span></label>
+          </div>
+          <div class="setting-switch full-width">
+            <div><strong>客户后台注册邮箱验证</strong><span>同时控制客户后台与客服链接面板注册时的邮箱验证码要求。</span></div>
+            <label class="switch"><input v-model="form.customerRegisterEmailVerificationEnabled" type="checkbox" /><span class="slider"></span></label>
           </div>
         </div>
 
@@ -589,6 +614,10 @@ onMounted(() => {
         </div>
 
         <div v-else class="settings-grid">
+          <div class="setting-switch full-width">
+            <div><strong>客服链接客户端下载提示</strong><span>控制客户通过客服链接进入聊天后是否显示客户端下载安装引导。</span></div>
+            <label class="switch"><input v-model="form.customerServiceClientDownloadPromptEnabled" type="checkbox" /><span class="slider"></span></label>
+          </div>
           <div class="input-group full-width">
             <label for="customer-service-domain">客服专属域名</label>
             <input id="customer-service-domain" v-model.trim="form.customerServiceDomain" class="input" placeholder="https://chat.example.com" />

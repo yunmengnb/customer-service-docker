@@ -59,7 +59,7 @@ const tenantRegister = [
     return true;
   }),
   body('email').trim().normalizeEmail().isEmail().withMessage('邮箱格式不正确'),
-  body('emailCode').trim().matches(/^\d{6}$/).withMessage('请输入6位邮箱验证码'),
+  body('emailCode').optional({ checkFalsy: true }).trim().matches(/^\d{6}$/).withMessage('请输入6位邮箱验证码'),
   validate,
 ];
 
@@ -139,7 +139,7 @@ const updateAgent = [...employeeFields(true), validate];
 
 // 访客进入/恢复
 const customerGuest = [
-  body('fingerprint').isString().trim().isLength({ min: 8, max: 500 }).withMessage('访客指纹无效'),
+  body('fingerprint').isString().trim().isLength({ min: 8, max: 2048 }).withMessage('访客指纹无效'),
   validate,
 ];
 
@@ -170,7 +170,7 @@ const customerRegister = [
     if (value !== req.body.password) throw new Error('两次输入的密码不一致');
     return true;
   }),
-  body('emailCode').trim().matches(/^\d{6}$/).withMessage('请输入6位邮箱验证码'),
+  body('emailCode').optional({ checkFalsy: true }).trim().matches(/^\d{6}$/).withMessage('请输入6位邮箱验证码'),
   body('fingerprint').optional().isString(),
   body('agreementAccepted').custom(value => value === true).withMessage('请先阅读并同意免责协议和使用协议'),
   validate,

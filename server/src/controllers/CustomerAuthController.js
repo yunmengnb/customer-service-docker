@@ -11,7 +11,7 @@ const cache = require('../utils/cache');
 const { sendMail } = require('../utils/mailer');
 const { normalizeEmail, sendEmailCode, verifyEmailCode } = require('../utils/emailVerification');
 const presence = require('../utils/presence');
-const { getSystemSettings } = require('../utils/systemSettings');
+const { getSystemSettings, authSettings } = require('../utils/systemSettings');
 const { ok, error, hashPassword, comparePassword, signToken, verifyToken, normalizePhone, qqAvatarUrl, customerAvatarUrl, hashFingerprint, getClientIp, passwordVersion } = require('../utils');
 
 async function getChannelByToken(publicToken) {
@@ -334,8 +334,8 @@ class CustomerAuthController {
 
   // POST /api/client/auth/login
   async accountLogin(req, res) {
-    const settings = await getSystemSettings();
-    if (!settings.loginEnabled) return error(res, '系统暂时关闭登录', 4034, 403);
+    const settings = authSettings(await getSystemSettings());
+    if (!settings.customerLoginEnabled) return error(res, '客户登录暂时关闭，有问题请联系管理员', 4034, 403);
 
     const identifier = String(req.body.identifier).trim().toLowerCase();
     const isEmail = identifier.includes('@');
@@ -355,10 +355,13 @@ class CustomerAuthController {
     const reportRegisterDebug = (msg, data) => fetch('http://email-debug:7777/event', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: 'email-verification', runId: 'pre-fix', hypothesisId: 'E', location: 'server/src/controllers/CustomerAuthController.js:sendAccountRegisterCode', msg: `[DEBUG] ${msg}`, data, ts: Date.now() }) }).catch(() => {});
     reportRegisterDebug('register-code-entry', { entryType: 'account' });
     // #endregion
-    const settings = await getSystemSettings();
-    if (!settings.registerEnabled) {
+    const settings = authSettings(await getSystemSettings());
+    if (!settings.customerRegisterEnabled) {
       reportRegisterDebug('register-code-result', { entryType: 'account', resultStatus: 'registration-disabled', httpCode: 403, cacheHitCategory: 'not-checked' });
       return error(res, '暂时无法注册，有问题请联系管理员', 4034, 403);
+    }
+    if (!settings.customerRegisterEmailVerificationEnabled) {
+      return error(res, '客户注册暂未开启邮箱验证', 4035, 403);
     }
     const email = String(req.body.email).trim().toLowerCase();
     if (await CustomerAccount.exists({ email })) {
@@ -391,18 +394,20 @@ class CustomerAuthController {
 
   // POST /api/client/auth/register
   async accountRegister(req, res) {
-    const settings = await getSystemSettings();
-    if (!settings.registerEnabled) return error(res, '暂时无法注册，有问题请联系管理员', 4034, 403);
+    const settings = authSettings(await getSystemSettings());
+    if (!settings.customerRegisterEnabled) return error(res, '暂时无法注册，有问题请联系管理员', 4034, 403);
     if (req.body.agreementAccepted !== true) return error(res, '请先阅读并同意免责协议和使用协议', 4001, 400);
     const phone = normalizePhone(req.body.phone);
     const email = String(req.body.email).trim().toLowerCase();
     if (await CustomerAccount.exists({ phone })) return error(res, '手机号已被注册');
     if (await CustomerAccount.exists({ email })) return error(res, '邮箱已被注册');
-    const codeKey = `customer:register-code:${crypto.createHash('sha256').update(email).digest('hex')}`;
-    const verification = await cache.getJson(codeKey);
-    const submittedHash = crypto.createHmac('sha256', config.jwt.secret).update(`${email}:${req.body.emailCode}`).digest('hex');
-    if (!verification?.codeHash || verification.codeHash.length !== submittedHash.length || !crypto.timingSafeEqual(Buffer.from(verification.codeHash), Buffer.from(submittedHash))) return error(res, '邮箱验证码错误或已过期', 4004, 400);
-    if (!await cache.consumeMatchingJson(codeKey, submittedHash)) return error(res, '邮箱验证码错误或已过期', 4004, 400);
+    if (settings.customerRegisterEmailVerificationEnabled) {
+      const codeKey = `customer:register-code:${crypto.createHash('sha256').update(email).digest('hex')}`;
+      const verification = await cache.getJson(codeKey);
+      const submittedHash = crypto.createHmac('sha256', config.jwt.secret).update(`${email}:${req.body.emailCode}`).digest('hex');
+      if (!verification?.codeHash || verification.codeHash.length !== submittedHash.length || !crypto.timingSafeEqual(Buffer.from(verification.codeHash), Buffer.from(submittedHash))) return error(res, '邮箱验证码错误或已过期', 4004, 400);
+      if (!await cache.consumeMatchingJson(codeKey, submittedHash)) return error(res, '邮箱验证码错误或已过期', 4004, 400);
+    }
     const ip = getClientIp(req);
     let account;
     try {
@@ -419,8 +424,8 @@ class CustomerAuthController {
   async login(req, res) {
     const channel = await getChannelByToken(req.params.token);
     if (!channel) return error(res, '客服链接无效或已过期', 404, 404);
-    const settings = await getSystemSettings();
-    if (!settings.loginEnabled) return error(res, '系统暂时关闭登录', 4034, 403);
+    const settings = authSettings(await getSystemSettings());
+    if (!settings.customerLoginEnabled) return error(res, '客户登录暂时关闭，有问题请联系管理员', 4034, 403);
 
     const identifier = String(req.body.identifier).trim().toLowerCase();
     const isEmail = identifier.includes('@');
@@ -470,10 +475,13 @@ class CustomerAuthController {
       reportRegisterDebug('register-code-result', { entryType: 'channel', resultStatus: 'channel-not-found', httpCode: 404, cacheHitCategory: 'not-checked' });
       return error(res, '客服链接无效或已过期', 404, 404);
     }
-    const settings = await getSystemSettings();
-    if (!settings.registerEnabled) {
+    const settings = authSettings(await getSystemSettings());
+    if (!settings.customerRegisterEnabled) {
       reportRegisterDebug('register-code-result', { entryType: 'channel', resultStatus: 'registration-disabled', httpCode: 403, cacheHitCategory: 'not-checked' });
       return error(res, '暂时无法注册，有问题请联系管理员', 4034, 403);
+    }
+    if (!settings.customerRegisterEmailVerificationEnabled) {
+      return error(res, '客户注册暂未开启邮箱验证', 4035, 403);
     }
 
     const email = String(req.body.email).trim().toLowerCase();
@@ -514,8 +522,8 @@ class CustomerAuthController {
   async register(req, res) {
     const channel = await getChannelByToken(req.params.token);
     if (!channel) return error(res, '客服链接无效或已过期', 404, 404);
-    const settings = await getSystemSettings();
-    if (!settings.registerEnabled) return error(res, '暂时无法注册，有问题请联系管理员', 4034, 403);
+    const settings = authSettings(await getSystemSettings());
+    if (!settings.customerRegisterEnabled) return error(res, '暂时无法注册，有问题请联系管理员', 4034, 403);
     if (req.body.agreementAccepted !== true) return error(res, '请先阅读并同意免责协议和使用协议', 4001, 400);
 
     const phone = normalizePhone(req.body.phone);
@@ -523,14 +531,16 @@ class CustomerAuthController {
     if (await CustomerAccount.exists({ phone })) return error(res, '手机号已被注册');
     if (await CustomerAccount.exists({ email })) return error(res, '邮箱已被注册');
 
-    const codeKey = `customer:register-code:${crypto.createHash('sha256').update(email).digest('hex')}`;
-    const verification = await cache.getJson(codeKey);
-    const submittedHash = crypto.createHmac('sha256', config.jwt.secret).update(`${email}:${req.body.emailCode}`).digest('hex');
-    if (!verification?.codeHash || verification.codeHash.length !== submittedHash.length || !crypto.timingSafeEqual(Buffer.from(verification.codeHash), Buffer.from(submittedHash))) {
-      return error(res, '邮箱验证码错误或已过期', 4004, 400);
-    }
+    if (settings.customerRegisterEmailVerificationEnabled) {
+      const codeKey = `customer:register-code:${crypto.createHash('sha256').update(email).digest('hex')}`;
+      const verification = await cache.getJson(codeKey);
+      const submittedHash = crypto.createHmac('sha256', config.jwt.secret).update(`${email}:${req.body.emailCode}`).digest('hex');
+      if (!verification?.codeHash || verification.codeHash.length !== submittedHash.length || !crypto.timingSafeEqual(Buffer.from(verification.codeHash), Buffer.from(submittedHash))) {
+        return error(res, '邮箱验证码错误或已过期', 4004, 400);
+      }
 
-    if (!await cache.consumeMatchingJson(codeKey, submittedHash)) return error(res, '邮箱验证码错误或已过期', 4004, 400);
+      if (!await cache.consumeMatchingJson(codeKey, submittedHash)) return error(res, '邮箱验证码错误或已过期', 4004, 400);
+    }
     const ip = getClientIp(req);
     let account;
     try {

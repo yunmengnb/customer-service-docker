@@ -6,7 +6,8 @@ import api from '../api'
 const loading = ref(true)
 const saving = ref(false)
 const notice = ref(null)
-const form = reactive({ enabled: false, serverBaseUrl: '', widgetBaseUrl: '' })
+const platformEnabled = ref(false)
+const form = reactive({ serverBaseUrl: '', widgetBaseUrl: '' })
 
 function showNotice(type, message) {
   notice.value = { type, message }
@@ -16,7 +17,7 @@ function showNotice(type, message) {
 }
 
 function applySetting(data = {}) {
-  form.enabled = data.enabled === true
+  platformEnabled.value = data.enabled === true
   form.serverBaseUrl = data.serverBaseUrl || ''
   form.widgetBaseUrl = data.widgetBaseUrl || ''
 }
@@ -40,15 +41,11 @@ async function saveSetting() {
   try {
     const res = await api.post('/integration/admin/setting', {
       action: 'save',
-      enabled: form.enabled,
       serverBaseUrl: form.serverBaseUrl.trim(),
       widgetBaseUrl: form.widgetBaseUrl.trim(),
     })
     if (res.code !== 200) throw new Error(res.msg || res.message || '保存失败')
-    applySetting({
-      ...res.data,
-      enabled: res.data?.enabled ?? form.enabled,
-    })
+    applySetting(res.data)
     showNotice('success', 'Jingpro 扩展配置已保存')
   } catch (error) {
     showNotice('error', error?.msg || error?.message || 'Jingpro 配置保存失败')
@@ -65,7 +62,7 @@ onMounted(loadSetting)
     <div>
       <RouterLink class="back-link" to="/extensions">返回扩展应用</RouterLink>
       <h1>Jingpro 联动扩展</h1>
-      <p class="desc">配置扩展开关及客服服务的公共访问地址</p>
+      <p class="desc">配置客服服务的公共访问地址；平台启停与企业授权统一在扩展目录管理</p>
     </div>
   </div>
 
@@ -82,8 +79,8 @@ onMounted(loadSetting)
       </div>
 
       <div class="setting-switch">
-        <div><strong>启用 Jingpro 联动</strong><span>关闭后停止使用该扩展的联动能力。</span></div>
-        <label class="switch"><input v-model="form.enabled" type="checkbox" /><span class="slider"></span></label>
+        <div><strong>平台状态：{{ platformEnabled ? '已启用' : '已停用' }}</strong><span>此处仅配置公共地址；请返回扩展应用页面调整平台开关和企业授权范围。</span></div>
+        <RouterLink class="btn btn-ghost" to="/extensions">前往平台控制</RouterLink>
       </div>
 
       <div class="form-grid">

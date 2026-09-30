@@ -14,3 +14,7 @@ server/uploads/
 **/*.jks
 **/*.keystore
 **/signing/*.properties
+
+.dbg/
+.trae/
+debug-*.md

@@ -350,6 +350,7 @@ for (const device of ['desktop', 'mobile']) {
     const context = attachmentComponentHarness(`user-web/src/views/${device}/ChatPanel.vue`, ['prepareSendWindow', 'handleUpload'], {
       conversationEpoch: 0, positionMode: { value: 'latest' }, loadMessages: async () => true,
       accepted: { value: true }, props: { conversationId: 'conversation-1' }, messageGeneration: 0,
+      URL: { createObjectURL: () => 'blob:upload' }, fetch: async () => {},
       showMore: { value: false }, createClientMessageId: () => `upload-${++sequence}`,
       FormData: class { append() {} }, showToast() {}, scrollToLatest: async () => {},
       mergeMessage: msg => rows.set(msg.clientMessageId, msg),
@@ -617,10 +618,175 @@ function response() {
   return { locals: {}, status(code) { this.http = code; return this; }, json(body) { this.body = body; return this; } };
 }
 
+test('integration multipart signature binds file digest and size', () => {
+  const crypto = require('node:crypto');
+  const { multipartSignatureInput, signRequest, verifyMultipartFile } = require('./src/middleware/integrationAuth');
+  const file = Buffer.from('signed image bytes');
+  const digest = crypto.createHash('sha256').update(file).digest('hex');
+  const input = multipartSignatureInput(digest, file.length);
+  assert.equal(input, `file-sha256:${digest}\nfile-size:${file.length}`);
+  const signature = signRequest('POST', '/api/integration/channels/c/images', '1', 'n', input, 'secret');
+  assert.notEqual(signature, signRequest('POST', '/api/integration/channels/c/images', '1', 'n', multipartSignatureInput(crypto.createHash('sha256').update('changed').digest('hex'), file.length), 'secret'));
+  let passed = false;
+  verifyMultipartFile({ file: { buffer: file }, integrationSignedFile: { sha256: digest, size: file.length } }, response(), () => { passed = true; });
+  assert.equal(passed, true);
+  const rejected = response();
+  verifyMultipartFile({ file: { buffer: Buffer.from('changed') }, integrationSignedFile: { sha256: digest, size: file.length } }, rejected, () => assert.fail('tampered file accepted'));
+  assert.equal(rejected.http, 403);
+  assert.equal(rejected.body.code, 403009);
+});
+
+test('tenant user HTTP and socket authentication reject missing sessions and stale tokens', async () => {
+  const password = require('./src/utils').hashPassword('current-password');
+  const currentPv = require('./src/utils').passwordVersion(password);
+  const TenantUser = { findOne: () => query({ _id: 'u', tenantId: 't', role: 'agent', status: 'active', password }) };
+  const Tenant = { findById: () => query({ _id: 't', status: 'active' }) };
+  const sessions = { validateSession: async payload => payload.sid === 'current-session' ? { _id: payload.sid } : null };
+  const auth = loadModule('src/middleware/auth.js', { '../models/TenantUser': TenantUser, '../models/Tenant': Tenant, '../services/tenantSessionService': sessions }).module.exports.authTenantUser;
+  for (const payload of [
+    { type: 'tenant_user', id: 'u', tenantId: 't', pv: currentPv },
+    { type: 'tenant_user', id: 'u', tenantId: 't', pv: currentPv, sid: 'revoked-session' },
+    { type: 'tenant_user', id: 'u', tenantId: 't', pv: 'stale', sid: 'current-session' },
+    { type: 'tenant_user', id: 'u', tenantId: 't', pv: currentPv, sid: 'current-session' },
+  ]) {
+    const res = response(); let passed = false;
+    await auth({ headers: {} }, res, () => { passed = true; }, payload);
+    assert.equal(passed, payload.sid === 'current-session' && payload.pv === currentPv);
+    if (!passed) assert.equal(res.http, 401);
+  }
+
+  let socketAuth;
+  const setup = loadModule('src/sockets/index.js', {
+    '../utils': { verifyToken: token => ({ type: 'tenant_user', id: 'u', tenantId: 't', sid: token === 'missing' ? undefined : token === 'revoked' ? 'revoked-session' : 'current-session', pv: token === 'current' ? currentPv : token === 'stale' ? 'stale' : currentPv }), passwordVersion: require('./src/utils').passwordVersion },
+    '../services/tenantSessionService': sessions,
+    '../config/redis': { getRedis: () => null }, '../models/TenantUser': TenantUser, '../models/Tenant': Tenant,
+  }).module.exports;
+  await setup({ use(fn) { socketAuth = fn; }, on() {} });
+  for (const token of ['missing', 'revoked', 'stale', 'current']) {
+    let rejected;
+    await socketAuth({ handshake: { auth: { token } } }, err => { rejected = err; });
+    assert.equal(!!rejected, token !== 'current');
+  }
+});
+
+test('integration security gates and migration collection remain enforced', () => {
+  const controller = fs.readFileSync(path.join(__dirname, 'src/controllers/IntegrationController.js'), 'utf8');
+  const tenantAuth = fs.readFileSync(path.join(__dirname, 'src/controllers/TenantAuthController.js'), 'utf8');
+  const loginKeyModel = fs.readFileSync(path.join(__dirname, 'src/models/TenantUserLoginKey.js'), 'utf8');
+  const loginKeyService = fs.readFileSync(path.join(__dirname, 'src/services/tenantLoginKeyService.js'), 'utf8');
+  const sessionService = fs.readFileSync(path.join(__dirname, 'src/services/tenantSessionService.js'), 'utf8');
+  const auth = fs.readFileSync(path.join(__dirname, 'src/middleware/auth.js'), 'utf8');
+  const sockets = fs.readFileSync(path.join(__dirname, 'src/sockets/index.js'), 'utf8');
+  const route = fs.readFileSync(path.join(__dirname, 'src/routes/integration.js'), 'utf8');
+  const migration = fs.readFileSync(path.join(__dirname, 'migrations/20260918-jingpro-binding-connections.js'), 'utf8');
+  assert.match(controller, /async ssoLogin[\s\S]*tenantLoginEnabled/);
+  assert.ok((controller.match(/enabled: true, status: 'active'/g) || []).length >= 2);
+  assert.match(controller, /createSessionAndToken\(\{ user, req, loginMethod: 'key'/);
+  assert.ok((tenantAuth.match(/createSessionAndToken\(\{ user: owner|createSessionAndToken\(\{ user, req/g) || []).length >= 3);
+  assert.match(loginKeyModel, /secretDigest: \{ type: String, required: true, select: false \}/);
+  assert.doesNotMatch(loginKeyModel, /secret:\s*\{/);
+  assert.match(loginKeyModel, /expiresAt:[\s\S]*required: true/);
+  assert.match(loginKeyModel, /consumedAt:[\s\S]*default: null/);
+  assert.match(loginKeyService, /const LOGIN_KEY_TTL_SECONDS = 120/);
+  assert.match(loginKeyService, /secretDigest: loginKeyDigest\(keyId, secret\)/);
+  assert.match(loginKeyService, /findOneAndUpdate\([\s\S]*consumedAt: null,[\s\S]*expiresAt: \{ \$gt: now \}/);
+  assert.match(tenantAuth, /consumeTemporaryLoginKey\(rawKey\)/);
+  assert.match(tenantAuth, /reason === 'LOGIN_KEY_EXPIRED'[\s\S]*401011[\s\S]*401012/);
+  assert.match(sessionService, /function tokenPayload[\s\S]*pv: passwordVersion\(user\.password\),[\s\S]*sid: String\(sessionId\)/);
+  assert.match(sessionService, /async function validateSession[\s\S]*!payload\?\.sid[\s\S]*revokedAt: null/);
+  assert.match(auth, /!payload\.sid[\s\S]*await validateSession\(payload\)/);
+  assert.match(sockets, /const loginSession = payload\.sid && await validateSession\(payload\)/);
+  assert.match(sockets, /if \(!loginSession\) return next\(new Error\('Session invalidated'\)\)/);
+  assert.match(auth, /!payload\.pv \|\| passwordVersion\(user\.password\) !== payload\.pv/);
+  assert.match(sockets, /!payload\.pv \|\| passwordVersion\(user\.password\) !== payload\.pv/);
+  assert.match(route, /router\.get\('\/ping', integrationPingAuth/);
+  assert.match(route, /router\.post\('\/login-key', integrationAuth, IntegrationController\.generateLoginKey\)/);
+  assert.match(controller, /async generateLoginKey[\s\S]*jingproUserId[\s\S]*connectionId: req\.integration\.connectionId[\s\S]*userId: binding\.ownerUserId,[\s\S]*source: 'jingpro'/);
+  assert.match(migration, /collection\('tenant_integrations'\)/);
+  assert.match(controller, /agentCount >= tenant\.plan\.agentLimit/);
+  assert.match(controller, /channelCount >= tenant\.plan\.channelLimit/);
+  const ssoSubject = controller.indexOf("No matching linked user found");
+  const ssoConsume = controller.indexOf('await consumeJti', ssoSubject);
+  assert.ok(ssoSubject >= 0 && ssoConsume > ssoSubject);
+});
+
+test('temporary login keys expire after 120 seconds and are consumed once atomically', async () => {
+  let stored = null;
+  const digest = (keyId, secret) => require('crypto').createHash('sha256').update(`${keyId}:${secret}`).digest('hex');
+  const LoginKey = {
+    async findOneAndUpdate(filter, update) {
+      if (!filter._id) {
+        stored = { _id: 'login-key', userId: 'user', ...update.$set };
+        return { ...stored };
+      }
+      if (stored && !stored.consumedAt && !stored.lastUsedAt && stored.expiresAt > filter.expiresAt.$gt) {
+        stored = { ...stored, ...update.$set };
+        return { ...stored };
+      }
+      return null;
+    },
+    findOne(filter) {
+      return { select: async () => stored && stored.keyId === filter.keyId ? { ...stored } : null };
+    },
+    findById() {
+      return { lean: async () => stored ? { ...stored } : null };
+    },
+  };
+  const service = loadModule('src/services/tenantLoginKeyService.js', {
+    '../models/TenantUserLoginKey': LoginKey,
+    './tenantSessionService': {
+      loginKeyDigest: digest,
+      safeDigestEqual: (left, right) => left === right,
+    },
+  }).module.exports;
+
+  const before = Date.now();
+  const generated = await service.generateTemporaryLoginKey({ tenantId: 'tenant', userId: 'user', source: 'jingpro' });
+  assert.match(generated.key, /^kf_[a-f0-9]{24}_[A-Za-z0-9_-]{43}$/);
+  assert.equal(generated.expiresIn, 120);
+  assert.equal(stored.source, 'jingpro');
+  assert.ok(generated.expiresAt.getTime() >= before + 120000);
+  assert.ok(generated.expiresAt.getTime() <= Date.now() + 120000);
+
+  const [first, second] = await Promise.all([
+    service.consumeTemporaryLoginKey(generated.key),
+    service.consumeTemporaryLoginKey(generated.key),
+  ]);
+  assert.equal([first, second].filter(result => result.loginKey).length, 1);
+  assert.equal([first, second].filter(result => result.reason === 'LOGIN_KEY_USED').length, 1);
+
+  stored.consumedAt = null;
+  stored.lastUsedAt = null;
+  stored.expiresAt = new Date(Date.now() - 1);
+  assert.equal((await service.consumeTemporaryLoginKey(generated.key)).reason, 'LOGIN_KEY_EXPIRED');
+});
+
+test('device revocation requires the current password session and no email code flow', () => {
+  const controller = fs.readFileSync(path.join(__dirname, 'src/controllers/TenantAuthController.js'), 'utf8');
+  const route = fs.readFileSync(path.join(__dirname, 'src/routes/tenant.js'), 'utf8');
+  const devices = fs.readFileSync(path.join(__dirname, '../user-web/src/views/LoginDevices.vue'), 'utf8');
+  const revokeStart = controller.indexOf('async revokeSession(req, res)');
+  const revokeEnd = controller.indexOf('\n  async getLoginKey', revokeStart);
+  const revokeSource = controller.slice(revokeStart, revokeEnd);
+
+  assert.doesNotMatch(controller, /sendSessionRevokeCode/);
+  assert.doesNotMatch(route, /revoke-code/);
+  assert.match(revokeSource, /_id: req\.user\.sid[\s\S]*loginMethod: 'password'[\s\S]*revokedAt: null[\s\S]*expiresAt: \{ \$gt: new Date\(\) \}/);
+  assert.match(revokeSource, /if \(!currentSession\) return error\(res, '仅账号密码登录可管理登录设备', 403, 403\)/);
+  assert.ok(revokeSource.indexOf('_id: req.user.sid') < revokeSource.indexOf('_id: req.params.id'));
+  assert.doesNotMatch(revokeSource, /verifyEmailCode|sendEmailCode|req\.body\?\.code/);
+  assert.doesNotMatch(devices, /验证码|revoke-code|countdown|requestCode|resendCode/);
+  assert.match(devices, /canManageDevices\.value = loginMethod\(currentSession\) === 'password'/);
+  assert.match(devices, /v-if="canManageDevices"[\s\S]*@click="revoke\(session\)"/);
+  assert.match(devices, /仅账号密码登录可管理设备/);
+  assert.match(devices, /api\.post\(`\/tenant\/auth\/sessions\/\$\{encodeURIComponent\(sessionId\)\}\/revoke`\)/);
+});
+
 test('deleted channel denies HTTP guest/customer context and both send paths before writes', async () => {
   for (const identity of ['guest', 'customer']) {
-    const payload = { type: 'customer', identity, id: 'b', tenantId: 't', channelId: 'c' };
+    const payload = { type: 'customer', sid: 'session', identity, id: 'b', tenantId: 't', channelId: 'c' };
     const mocks = { '../utils': { ...require('./src/utils'), verifyToken: () => payload },
+      '../services/customerSessionService': { validateSession: async received => received.sid === 'session' ? { _id: 'session' } : null },
       '../models/Channel': { findOne: filter => { assert.equal(filter.tenantId, 't'); return query(null); } },
       '../models/Tenant': { findOne: () => query({ _id: 't' }) } };
     const res = response();
@@ -640,7 +806,10 @@ test('channel deletion scopes cleanup and evicts only related subscriptions', as
   const scoped = filter => { assert.equal(filter.tenantId, 't'); calls.push(filter); };
   const controller = loadModule('src/controllers/ChannelController.js', {
     '../models/Channel': { findOne: () => query({ _id: 'c', publicToken: 'p' }), deleteOne: scoped },
+    '../models/IntegrationBinding': { exists: async () => false },
     '../models/KeywordReply': { deleteMany: scoped }, '../models/QuickReply': { deleteMany: scoped },
+    '../models/WechatAuthChallenge': { updateMany: async () => {} },
+    '../services/customerSessionService': { revokeMany: async () => 0 },
     '../utils/cache': { remove: async () => {} }, '../services/auditLogService': { recordOperation() {} },
   }).module.exports;
   const rooms = [];
@@ -806,7 +975,7 @@ test('mobile ordinary conversation navigation removes stale message location que
   const match = source.match(/function openConversation\([^]*?\n\}/);
   assert.ok(match);
   let pushed;
-  const context = vm.createContext({ search: { value: '' }, route: { query: { channelId: 'channel', message: 'old', around: 'old' } }, router: { push: value => { pushed = value; } }, reportDebugEvent });
+  const context = vm.createContext({ search: { value: '' }, route: { query: { channelId: 'channel', message: 'old', around: 'old' } }, router: { push: value => { pushed = value; } }, saveListState() {}, reportDebugEvent });
   vm.runInContext(match[0], context);
   context.openConversation({ _id: 'conversation' });
   assert.deepEqual(JSON.parse(JSON.stringify(pushed)), { path: '/m/messages/conversation', query: { channelId: 'channel' } });
@@ -842,7 +1011,8 @@ function query(value) {
  test('impersonation 401 then each real logout preserves isolation and administrator storage', async () => {
   for (const [file, fn] of [['Layout.vue', 'logout'], ['MobileLayout.vue', 'logout'], ['mobile/Profile.vue', 'doLogout']]) {
     const local = new Map([['tenant_token', 'original-admin'], ['tenant_user', '{"role":"owner"}'], ['tenant_info', '{"id":"tenant"}']]);
-    const before = [...local];
+    const identityKeys = ['tenant_token', 'tenant_user', 'tenant_info'];
+    const before = identityKeys.map(key => [key, local.get(key)]);
     const session = new Map([['tenant_impersonation', '1'], ['tenant_token', 'impersonated'], ['tenant_user', '{"role":"agent"}']]);
     const storage = map => ({ getItem: key => map.get(key) ?? null, removeItem: key => map.delete(key), setItem: (key, value) => map.set(key, value) });
     let request, rejectResponse;
@@ -868,7 +1038,8 @@ function query(value) {
     assert.equal(context.readTenantCache('tenant_info'), null);
     assert.equal(request({ url: '/tenant/auth/me', baseURL: '/api', headers: {} }).headers.Authorization, undefined);
     assert.equal(session.get('tenant_impersonation'), '1');
-    assert.deepEqual([...local], before);
+    assert.deepEqual(identityKeys.map(key => [key, local.get(key)]), before);
+    assert.ok(local.get('tenant_device_id'));
   }
 });
 
@@ -900,15 +1071,15 @@ function query(value) {
       if (target === 'middleware') {
         const res = { locals: {}, status(code) { this.http = code; return this; }, json(body) { this.body = body; return this; } };
         await context.authCustomer({ headers: { authorization: 'Bearer test' } }, res, () => { nextCalls++; });
-        assert.equal(nextCalls, ['guest', 'match', 'create'].includes(mode) ? 1 : 0, `${target}/${mode}`);
-        if (['mismatch', 'race'].includes(mode)) assert.equal(res.http, 401);
+        assert.equal(nextCalls, 0, `${target}/${mode}`);
+        assert.equal(res.http, 401, `${target}/${mode} rejects JWT without sid`);
       } else {
         const result = await context.resolveAccount(payload);
         assert.equal(Boolean(result), ['match', 'create'].includes(mode), `${target}/${mode}`);
       }
-      assert.equal(saves, ['match', 'create'].includes(mode) ? 1 : 0, `${target}/${mode} saves`);
+      assert.equal(saves, target === 'resolver' && ['match', 'create'].includes(mode) ? 1 : 0, `${target}/${mode} saves`);
       if (['guest', 'guest-binding'].includes(mode)) {
-        assert.equal(lookups, target === 'middleware' && mode === 'guest-binding' ? 1 : 0);
+        assert.equal(lookups, 0);
         assert.equal(creates, 0);
       }
     }

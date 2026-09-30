@@ -6,7 +6,8 @@ const ATTACHMENT_ID_PATTERN = /^[a-f\d]{24}$/i
 // #region debug-point DEBUG:network-reporter
 export function reportDebugEvent(hypothesisId, location, msg, data = {}) {
   try {
-    const endpoint = import.meta.env.VITE_DEBUG_SERVER_URL || 'http://192.168.1.146:7777/event'
+    const endpoint = import.meta.env.VITE_DEBUG_SERVER_URL
+    if (!endpoint) return
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 1500)
     fetch(endpoint, {

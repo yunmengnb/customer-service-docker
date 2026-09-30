@@ -1,6 +1,6 @@
 <!-- 忆梦云团队开发 - 桌面端：可折叠侧边栏布局 -->
 <script setup>
-import { clearTenantSession, readTenantCache } from '../api'
+import api, { clearTenantSession, readTenantCache } from '../api'
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
@@ -31,6 +31,9 @@ const navItems = computed(() => [
     ? [{ path: '/desktop/account', icon: '◇', label: '企业套餐与用量' }]
     : []),
   { path: '/desktop/logs', icon: '🕓', label: '操作日志' },
+  { path: '/wechat-binding', icon: 'W', label: '微信绑定' },
+  { path: '/desktop/login-devices', icon: '▣', label: '登录设备' },
+  { path: '/desktop/login-key', icon: '⌘', label: '登录密钥' },
   { path: '/desktop/profile', icon: '♙', label: '个人资料' },
 ])
 
@@ -41,9 +44,11 @@ function active(path) {
 async function logout() {
   showLogoutConfirm.value = false
   const identityScope = tenantIdentityScope()
-  await clearIdentityCache(identityScope)
-  clearTenantSession()
-  router.replace('/login')
+  try { await api.post('/tenant/auth/logout') } catch (_) {}
+  try { await clearIdentityCache(identityScope) } finally {
+    clearTenantSession()
+    router.replace('/login')
+  }
 }
 
 // 消息中心路由：占满全屏，去掉 header 内容 padding

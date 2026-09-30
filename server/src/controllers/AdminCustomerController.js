@@ -1,6 +1,7 @@
 // 忆梦云团队开发 - 平台客户管理
 const CustomerAccount = require('../models/CustomerAccount');
 const Customer = require('../models/Customer');
+const customerSessions = require('../services/customerSessionService');
 const { ok, error, hashPassword, normalizePhone, qqAvatarUrl } = require('../utils');
 
 class AdminCustomerController {
@@ -29,6 +30,7 @@ class AdminCustomerController {
     const account = await CustomerAccount.findById(req.params.id);
     if (!account) return error(res, '客户不存在', 404, 404);
     const body = req.body || {};
+    const passwordChanged = body.password !== undefined;
     if (body.phone !== undefined) {
       const phone = normalizePhone(body.phone);
       if (!/^[\d+][\d+-]{5,19}$/.test(phone)) return error(res, '手机号格式不正确');
@@ -68,7 +70,13 @@ class AdminCustomerController {
       throw err;
     }
     await Customer.updateMany({ accountId: account._id }, { $set: { phone: account.phone, email: account.email, qq: account.qq, nickname: account.nickname, avatarUrl: account.avatarUrl, password: account.password, status: account.status } });
-    if (account.status === 'disabled') req.app.get('io')?.in(`customer-account-${account._id}`).disconnectSockets(true);
+    if (account.status === 'disabled' || passwordChanged) {
+      await customerSessions.revokeMany(
+        { accountId: account._id },
+        account.status === 'disabled' ? '客户账号已禁用' : '客户密码已由管理员修改',
+        req.app.get('io'),
+      );
+    }
     return ok(res, account.toJSON(), '客户资料已更新');
   }
 

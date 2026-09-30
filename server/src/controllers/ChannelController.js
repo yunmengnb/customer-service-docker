@@ -1,7 +1,11 @@
 // 忆梦云团队开发
 const Channel = require('../models/Channel');
+const Conversation = require('../models/Conversation');
+const Customer = require('../models/Customer');
+const CustomerAccount = require('../models/CustomerAccount');
 const IntegrationBinding = require('../models/IntegrationBinding');
 const KeywordReply = require('../models/KeywordReply');
+const Message = require('../models/Message');
 const QuickReply = require('../models/QuickReply');
 const Tenant = require('../models/Tenant');
 const TenantUser = require('../models/TenantUser');
@@ -10,6 +14,7 @@ const cache = require('../utils/cache');
 const { ok, error, generateToken } = require('../utils');
 const { getSystemSettings, buildCustomerServiceLink } = require('../utils/systemSettings');
 const { recordOperation } = require('../services/auditLogService');
+const customerSessions = require('../services/customerSessionService');
 
 function invalidateChannelConfig(...tokens) {
   return cache.remove(...tokens.map(token => token && `config:channel:token:${token}`));
@@ -53,9 +58,98 @@ class ChannelController {
       Channel.find(where).sort({ createdAt: -1 }),
       getSystemSettings(),
     ]);
+
+    const channelIds = channels.map(channel => channel._id);
+    let summaries = [];
+    if (channelIds.length) {
+      const conversationWhere = {
+        tenantId: req.tenantId,
+        channelId: { $in: channelIds },
+      };
+      if (req.user.role === 'agent') {
+        conversationWhere.$or = [
+          { status: 'waiting' },
+          { status: { $in: ['active', 'closed'] }, assignedAgentId: req.user.id },
+        ];
+      }
+
+      summaries = await Conversation.aggregate([
+        { $match: Conversation.find(conversationWhere).cast(Conversation) },
+        { $lookup: {
+          from: Message.collection.name,
+          let: { conversationId: '$_id', tenantId: '$tenantId' },
+          pipeline: [
+            { $match: {
+              senderType: 'customer',
+              deletedForAgentAt: null,
+              $expr: { $and: [
+                { $eq: ['$conversationId', '$$conversationId'] },
+                { $eq: ['$tenantId', '$$tenantId'] },
+              ] },
+            } },
+            { $sort: { createdAt: -1, _id: -1 } },
+            { $group: {
+              _id: null,
+              lastMessage: { $first: '$$ROOT' },
+              unreadCount: { $sum: { $cond: [{ $eq: ['$readByAgent', false] }, 1, 0] } },
+            } },
+          ],
+          as: 'customerMessages',
+        } },
+        { $set: {
+          lastMessage: { $arrayElemAt: ['$customerMessages.lastMessage', 0] },
+          unreadCount: { $ifNull: [{ $arrayElemAt: ['$customerMessages.unreadCount', 0] }, 0] },
+        } },
+        { $unset: 'customerMessages' },
+        { $sort: { 'lastMessage.createdAt': -1, _id: -1 } },
+        { $group: {
+          _id: '$channelId',
+          agentUnreadCount: { $sum: '$unreadCount' },
+          latestConversation: { $first: {
+            conversationId: '$_id',
+            customerId: '$customerId',
+            lastMessage: '$lastMessage',
+          } },
+        } },
+      ]);
+    }
+
+    const customerIds = summaries
+      .filter(summary => summary.latestConversation?.lastMessage)
+      .map(summary => summary.latestConversation.customerId);
+    const customers = customerIds.length
+      ? await Customer.find({ _id: { $in: customerIds }, tenantId: req.tenantId })
+        .select('_id accountId identityType nickname qq phone avatarUrl')
+        .lean()
+      : [];
+    const accountIds = [...new Set(customers.filter(customer => customer.accountId).map(customer => String(customer.accountId)))];
+    const accounts = accountIds.length
+      ? await CustomerAccount.find({ _id: { $in: accountIds } }).select('_id nickname qq avatarUrl').lean()
+      : [];
+    const accountMap = Object.fromEntries(accounts.map(account => [String(account._id), account]));
+    const customerMap = Object.fromEntries(customers.map(customer => {
+      const account = customer.accountId && customer.identityType !== 'guest'
+        ? accountMap[String(customer.accountId)]
+        : null;
+      return [String(customer._id), {
+        _id: customer._id,
+        nickname: account?.nickname || customer.nickname || '',
+        qq: account?.qq || customer.qq || '',
+        phone: customer.phone || '',
+        avatarUrl: account?.avatarUrl || customer.avatarUrl || '',
+      }];
+    }));
+    const summaryMap = Object.fromEntries(summaries.map(summary => [String(summary._id), summary]));
+
     return ok(res, channels.map(c => {
       const obj = c.toJSON();
+      const summary = summaryMap[String(c._id)];
       obj.link = buildCustomerServiceLink(settings, c.publicToken);
+      obj.agentUnreadCount = summary?.agentUnreadCount || 0;
+      obj.latestConversation = summary?.latestConversation?.lastMessage ? {
+        customer: customerMap[String(summary.latestConversation.customerId)] || null,
+        lastMessage: Message.applyAttachmentUrls(summary.latestConversation.lastMessage),
+      } : null;
       return obj;
     }));
   }
@@ -151,8 +245,19 @@ class ChannelController {
       return error(res, '鲸商城永久绑定渠道不可删除，请在鲸商城关闭挂件', 409, 409);
     }
     await Channel.deleteOne({ _id: channel._id, tenantId: req.tenantId });
-    // 保留客户、会话与消息历史，仅撤销已删除渠道的实时订阅。
+    // 保留客户、会话与消息历史，但持久化撤销渠道会话与未完成微信流程。
     const io = req.app.get('io');
+    await customerSessions.revokeMany(
+      { tenantId: req.tenantId, channelId: channel._id },
+      '渠道已删除',
+      io,
+    );
+    await require('../models/WechatAuthChallenge').updateMany({
+      tenantId: req.tenantId,
+      channelId: channel._id,
+      clientSide: 'client',
+      state: { $nin: ['consumed', 'cancelled', 'expired'] },
+    }, { $set: { state: 'cancelled' } });
     if (io) {
       io.in(`channel-${channel._id}`).disconnectSockets(true);
       io.in(`channel-staff-${channel._id}`).socketsLeave(`channel-staff-${channel._id}`);

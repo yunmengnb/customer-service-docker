@@ -4,7 +4,7 @@ package com.chat.ymykf;
 import android.net.Uri;
 
 final class AppConfig {
-    static final String ORIGIN = "https://chat.by0.me";
+    static final String ORIGIN = "https://kf-chat.czez.top";
     static final String ACCOUNT_URL = ORIGIN + "/account";
     static final String ANNOUNCEMENTS_API_URL =
             ORIGIN + "/api/app/customer-center/announcements";

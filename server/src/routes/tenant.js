@@ -26,6 +26,7 @@ router.get('/auth/captcha', CaptchaController.create);
 router.post('/auth/register-code', validators.emailCode, TenantAuthController.sendRegisterCode);
 router.post('/auth/register', verifyCaptcha, validators.tenantRegister, TenantAuthController.register);
 router.post('/auth/login', verifyCaptcha, validators.tenantLogin, TenantAuthController.login);
+router.post('/auth/key-login', TenantAuthController.keyLogin);
 router.post('/auth/forgot-password/code', validators.emailCode, TenantAuthController.sendResetCode);
 router.post('/auth/forgot-password/reset', validators.resetPassword, TenantAuthController.resetPassword);
 router.get('/auth/me', authTenantUser, TenantAuthController.me);
@@ -34,6 +35,11 @@ router.patch('/auth/profile', authTenantUser, TenantAuthController.updateProfile
 router.post('/auth/profile/email-code', authTenantUser, validators.tenantProfileCode, TenantAuthController.sendProfileEmailCode);
 router.patch('/auth/profile/email', authTenantUser, validators.tenantEmail, TenantAuthController.updateEmail);
 router.patch('/auth/profile/password', authTenantUser, validators.tenantPassword, TenantAuthController.updatePassword);
+router.get('/auth/sessions', authTenantUser, TenantAuthController.listSessions);
+router.post('/auth/sessions/:id/revoke', authTenantUser, TenantAuthController.revokeSession);
+router.get('/auth/login-key', authTenantUser, TenantAuthController.getLoginKey);
+router.post('/auth/login-key/generate', authTenantUser, TenantAuthController.generateLoginKey);
+router.delete('/auth/login-key', authTenantUser, TenantAuthController.revokeLoginKey);
 
 // ===== 扩展应用（租户管理员）=====
 router.get('/extensions', authTenantUser, requireTenantAdmin, IntegrationController.listTenantExtensions);

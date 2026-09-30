@@ -19,6 +19,7 @@ const routes = [
       { path: 'extensions', component: () => import('./views/Extensions.vue'), meta: { requiresSuper: true } },
       { path: 'extensions/jingpro', component: () => import('./views/JingproExtension.vue'), meta: { requiresSuper: true } },
       { path: 'settings', component: () => import('./views/Settings.vue'), meta: { requiresSuper: true } },
+      { path: 'data-migration', component: () => import('./views/DataMigration.vue'), meta: { requiresSuper: true } },
       { path: 'version', component: () => import('./views/Version.vue'), meta: { keepAlive: true } },
       { path: 'profile', component: () => import('./views/Profile.vue') },
     ],

@@ -51,8 +51,9 @@ function invalidEmployee(body, creating = false) {
   if (creating && (typeof body.password !== 'string' || body.password.length < 6 || body.password.length > 72)) return '密码须为6-72位';
   return '';
 }
-const { ok, error, hashPassword, signToken, passwordVersion } = require('../utils');
+const { ok, error, hashPassword } = require('../utils');
 const { recordOperation } = require('../services/auditLogService');
+const { createSessionAndToken } = require('../services/tenantSessionService');
 
 class AgentController {
   // GET /api/tenant/employees
@@ -68,7 +69,7 @@ class AgentController {
     const invalid = invalidEmployee(req.body, true);
     if (invalid) return error(res, invalid);
     const { password, role = 'agent' } = req.body;
-    const username = req.body.username.trim();
+    const username = req.body.username.trim().toLowerCase();
     const displayName = req.body.displayName.trim();
     const emailAddress = normalizedEmail(req.body.email);
     
@@ -82,9 +83,13 @@ class AgentController {
       return error(res, '已达到员工数量上限');
     }
     
-    // 唯一用户名
-    if (await TenantUser.findOne({ tenantId, username })) {
-      return error(res, '用户名已存在');
+    // 客服后台登录用户名全局唯一（含企业所有者账号）
+    const [tenantUsernameInUse, userUsernameInUse] = await Promise.all([
+      Tenant.exists({ username }),
+      TenantUser.exists({ username }),
+    ]);
+    if (tenantUsernameInUse || userUsernameInUse) {
+      return error(res, '用户名已存在', 409, 409);
     }
     if (await emailInUse(emailAddress)) return error(res, '邮箱已被使用', 409, 409);
     
@@ -118,11 +123,17 @@ class AgentController {
 
     const invalid = invalidEmployee(req.body);
     if (invalid) return error(res, invalid);
-    if (req.body.username !== undefined && req.body.username !== user.username) {
-      const username = String(req.body.username).trim();
+    if (req.body.username !== undefined) {
+      const username = String(req.body.username).trim().toLowerCase();
       if (username.length < 3) return error(res, '用户名至少3位');
-      if (await TenantUser.findOne({ tenantId, username, _id: { $ne: user._id } })) {
-        return error(res, '用户名已存在');
+      if (username !== user.username) {
+        const [tenantUsernameInUse, userUsernameInUse] = await Promise.all([
+          Tenant.exists({ username }),
+          TenantUser.exists({ username, _id: { $ne: user._id } }),
+        ]);
+        if (tenantUsernameInUse || userUsernameInUse) {
+          return error(res, '用户名已存在', 409, 409);
+        }
       }
       user.username = username;
     }
@@ -205,15 +216,7 @@ class AgentController {
     await employee.save();
 
     const tenant = await Tenant.findById(req.tenantId);
-    const token = signToken({
-      type: 'tenant_user',
-      id: employee._id.toString(),
-      tenantId: employee.tenantId.toString(),
-      username: employee.username,
-      displayName: employee.displayName,
-      role: employee.role,
-      pv: passwordVersion(employee.password),
-    });
+    const { token } = await createSessionAndToken({ user: employee, req, loginMethod: 'key' });
 
     return ok(res, {
       token,

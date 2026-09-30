@@ -2,4 +2,5 @@
 <!-- 忆梦云团队开发 -->
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <files-path name="chat_files" path="chat_files/" />
+    <external-files-path name="apk" path="apk/" />
 </paths>

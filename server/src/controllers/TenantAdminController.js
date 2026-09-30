@@ -43,6 +43,7 @@ class TenantAdminController {
   async update(req, res) {
     const tenant = await Tenant.findById(req.params.id);
     if (!tenant) return error(res, '租户不存在', 404, 404);
+    const owner = await TenantUser.findOne({ tenantId: tenant._id, role: 'owner' });
     const body = req.body || {};
     if (body.name !== undefined) {
       const name = String(body.name).trim();
@@ -50,9 +51,15 @@ class TenantAdminController {
       tenant.name = name;
     }
     if (body.username !== undefined) {
-      const username = String(body.username).trim();
+      const username = String(body.username).trim().toLowerCase();
       if (username.length < 3 || username.length > 50) return error(res, '用户名须为3-50位');
-      if (await Tenant.exists({ username, _id: { $ne: tenant._id } })) return error(res, '用户名已被使用');
+      const userQuery = { username };
+      if (owner) userQuery._id = { $ne: owner._id };
+      const [tenantConflict, userConflict] = await Promise.all([
+        Tenant.exists({ username, _id: { $ne: tenant._id } }),
+        TenantUser.exists(userQuery),
+      ]);
+      if (tenantConflict || userConflict) return error(res, '用户名已被使用', 409, 409);
       tenant.username = username;
     }
     if (body.email !== undefined) {
@@ -74,15 +81,15 @@ class TenantAdminController {
       if (!['active', 'disabled', 'trial'].includes(body.status)) return error(res, '状态值无效');
       tenant.status = body.status;
     }
-    try {
-      await tenant.save();
-    } catch (err) {
-      if (err?.code === 11000) return error(res, '用户名或邮箱已被使用');
-      throw err;
-    }
     const ownerUpdates = { displayName: tenant.name, username: tenant.username };
     if (body.password !== undefined) ownerUpdates.password = tenant.password;
-    await TenantUser.updateOne({ tenantId: tenant._id, role: 'owner' }, { $set: ownerUpdates });
+    try {
+      await tenant.save();
+      await TenantUser.updateOne({ tenantId: tenant._id, role: 'owner' }, { $set: ownerUpdates }, { runValidators: true });
+    } catch (err) {
+      if (err?.code === 11000) return error(res, '用户名或邮箱已被使用', 409, 409);
+      throw err;
+    }
     if (tenant.status === 'disabled') {
       const io = req.app.get('io');
       const sockets = io ? await io.fetchSockets() : [];

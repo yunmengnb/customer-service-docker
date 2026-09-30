@@ -9,7 +9,7 @@ const ownerIndexName = 'idx_integration_owner_user';
 
 async function up(db) {
   const bindings = db.collection('integrationbindings');
-  const connections = db.collection('tenantintegrations');
+  const connections = db.collection('tenant_integrations');
   const cursor = bindings.find({
     platformId: 'jingpro',
     $or: [{ connectionId: { $exists: false } }, { connectionId: null }],

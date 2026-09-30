@@ -10,13 +10,13 @@ function basePayload(req, extra) {
   };
 }
 
-// 日志记录采用 fire-and-forget，失败不影响业务主流程
+// 默认调用方可忽略返回值；关键操作可 await，确保响应前已尝试持久化审计。
 function write(payload) {
-  AuditLog.create(payload).catch(() => {});
+  return AuditLog.create(payload).catch(() => null);
 }
 
 function recordLogin({ req, tenantId = null, user = null, action = 'login', result = 'success', detail = '' }) {
-  write(basePayload(req, {
+  return write(basePayload(req, {
     type: 'login',
     tenantId,
     userId: user?._id || user?.id || null,
@@ -30,7 +30,7 @@ function recordLogin({ req, tenantId = null, user = null, action = 'login', resu
 }
 
 function recordOperation({ req, tenantId, user, action, detail = '', result = 'success' }) {
-  write(basePayload(req, {
+  return write(basePayload(req, {
     type: 'operation',
     tenantId,
     userId: user?._id || user?.id || null,

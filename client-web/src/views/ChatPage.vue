@@ -38,6 +38,12 @@
       </button>
     </div>
 
+    <aside v-if="showWechatReminder" class="wechat-reminder" aria-label="微信绑定提醒">
+      <div><strong>绑定微信，方便下次找回本次咨询</strong><span>非强制操作，可随时解绑；访客仅能恢复当前渠道和会话。</span></div>
+      <button type="button" class="wechat-reminder-action" @click="startWechat('bind')">立即绑定</button>
+      <button type="button" class="wechat-reminder-close" aria-label="关闭微信绑定提醒" @click="dismissWechatReminder">×</button>
+    </aside>
+
     <div class="chat-messages" ref="msgContainer" @scroll="handleMessageScroll">
       <div v-if="loadingHistory" class="history-loading">正在加载历史消息...</div>
       <div v-else-if="!hasMoreMessages && messages.length" class="history-end">没有更早的消息了</div>
@@ -235,6 +241,13 @@
               </button>
             </div>
           </div>
+          <div class="dashboard-wechat-actions">
+            <button v-if="wechatBinding.bound" type="button" class="dashboard-secondary danger" :disabled="wechatLoading" @click="unbindWechat">解绑微信</button>
+            <button v-else type="button" class="dashboard-secondary wechat" :disabled="wechatLoading || !wechatBinding.available" @click="startWechat('bind')">
+              {{ wechatLoading ? '处理中...' : '绑定微信找回会话' }}
+            </button>
+            <small>{{ wechatBinding.bound ? `已绑定 ${wechatBinding.account || '微信公众号'}` : '绑定后仍仅可访问当前身份有权查看的会话' }}</small>
+          </div>
           <button type="button" class="dashboard-primary" @click="goToAccount">{{ isGuest ? '绑定客户账号' : '进入客户后台' }}</button>
         </div>
       </section>
@@ -402,8 +415,32 @@
             {{ loginLoading ? '处理中...' : (authTab === 'register' ? '注册并进入聊天' : (authTab === 'login' ? '登录并进入聊天' : '重置密码')) }}
           </button>
         </div>
+        <div v-if="authTab === 'login'" class="wechat-auth-entry">
+          <span>或</span>
+          <button type="button" :disabled="wechatLoading" @click="startWechat('login')">{{ wechatLoading ? '正在发起...' : '使用微信授权登录' }}</button>
+          <small>只会显示当前客服渠道中已绑定的身份</small>
+        </div>
         </template>
       </div>
+    </div>
+
+    <!-- 微信绑定/登录二维码 -->
+    <div v-if="wechatChallenge" class="modal-overlay wechat-challenge-overlay" @click.self="closeWechatChallenge">
+      <section class="modal-content wechat-challenge-modal" role="dialog" aria-modal="true" aria-labelledby="wechat-challenge-title">
+        <button type="button" class="dashboard-close wechat-challenge-close" aria-label="关闭微信操作" @click="closeWechatChallenge">×</button>
+        <div class="wechat-challenge-icon">微</div>
+        <div id="wechat-challenge-title" class="modal-title">{{ wechatChallenge.purpose === 'bind' ? '绑定微信找回会话' : '微信授权登录' }}</div>
+        <div class="modal-desc">使用微信扫描下方二维码，并在微信内核对公众号、渠道和安全短语后确认。</div>
+        <img class="wechat-qr-image" :src="wechatChallenge.scanUrl" alt="微信公众号授权二维码" />
+        <div class="wechat-phrase-box"><span>安全短语</span><strong>{{ wechatChallenge.phrase }}</strong></div>
+        <div :class="['wechat-challenge-status', wechatChallengeError ? 'error' : '']">{{ wechatChallengeError || wechatChallengeText }}</div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" @click="closeWechatChallenge">取消</button>
+          <button type="button" class="btn btn-primary" :disabled="wechatFinishing || wechatChallenge.state !== 'confirmed'" @click="finishWechat">
+            {{ wechatFinishing ? '完成中...' : (wechatChallenge.purpose === 'bind' ? '完成绑定' : '完成登录') }}
+          </button>
+        </div>
+      </section>
     </div>
 
     <!-- 访客禁止进入 APP -->
@@ -459,7 +496,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted, nextTick, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api, getSocket } from '../api'
+import { api, clearClientSession, getSocket } from '../api'
 import {
   acquireObjectUrl,
   avatarCacheKey,
@@ -580,6 +617,13 @@ const agreed = ref(false)
 const resetForm = ref({ phone: '', email: '', emailCode: '', newPassword: '', confirmPassword: '' })
 const loginLoading = ref(false)
 const loginErr = ref('')
+const wechatLoading = ref(false)
+const wechatFinishing = ref(false)
+const wechatBinding = ref({ bound: false, available: false, account: '' })
+const wechatChallenge = ref(null)
+const wechatChallengeError = ref('')
+const wechatChallengeText = ref('等待扫码...')
+const showWechatReminder = ref(false)
 const codeLoading = ref(false)
 const codeCountdown = ref(0)
 const resetCodeLoading = ref(false)
@@ -633,6 +677,7 @@ let serverSnapshotCursor = null
 let codeCountdownTimer = null
 let resetCodeTimer = null
 let complaintEmailCodeTimer = null
+let wechatPollTimer = null
 let geetestInstance = null
 let complaintGeetestInstance = null
 let geetestScriptPromise = null
@@ -897,6 +942,7 @@ async function loadChannel() {
       setupSocket()
       await loadConversation()
       await loadMessages()
+      await loadWechatBinding()
       if (isGuest.value) {
         guestPromptReason.value = 'return'
         showGuestAppBlocked.value = true
@@ -922,11 +968,158 @@ async function loadMe() {
       await loadConversation()
       await loadMessages()
       setupSocket()
+      await loadWechatBinding()
       if (!customer.value.qq) showQQModal.value = true
     }
   } catch (e) {
     await clearIdentityCache(clientIdentityScope(customer.value))
     localStorage.removeItem('client_token')
+  }
+}
+
+const wechatReminderKey = computed(() => `client_wechat_reminder_${token.value}_${customer.value?._id || customer.value?.id || 'anonymous'}`)
+
+function reminderDismissed() {
+  const until = Number(localStorage.getItem(wechatReminderKey.value) || 0)
+  return Number.isFinite(until) && until > Date.now()
+}
+
+function dismissWechatReminder() {
+  localStorage.setItem(wechatReminderKey.value, String(Date.now() + 7 * 24 * 60 * 60 * 1000))
+  showWechatReminder.value = false
+}
+
+async function loadWechatBinding() {
+  if (!customer.value || !conversation.value?._id) return
+  try {
+    const res = await api.get('/wechat/client/binding')
+    if (res.code !== 0) return
+    wechatBinding.value = res.data
+    showWechatReminder.value = !res.data.bound && res.data.available && !reminderDismissed()
+  } catch {
+    wechatBinding.value = { bound: false, available: false, account: '' }
+    showWechatReminder.value = false
+  }
+}
+
+function scheduleWechatPoll() {
+  clearTimeout(wechatPollTimer)
+  if (!wechatChallenge.value || ['cancelled', 'consumed', 'expired'].includes(wechatChallenge.value.state)) return
+  wechatPollTimer = setTimeout(pollWechatStatus, 1600)
+}
+
+async function pollWechatStatus() {
+  const current = wechatChallenge.value
+  if (!current) return
+  try {
+    const res = await api.get(`/wechat/client/status/${current.id}`)
+    if (!wechatChallenge.value || wechatChallenge.value.id !== current.id || res.code !== 0) return
+    const state = res.data.state
+    wechatChallenge.value = { ...wechatChallenge.value, state }
+    wechatChallengeText.value = {
+      pending: '等待微信扫码...',
+      scanned: '已扫码，请在微信中点击链接继续验证',
+      oauth_verified: '微信身份已验证，请在微信中明确确认',
+      confirmed: '微信端已确认，请在此浏览器完成操作',
+      consumed: '本次操作已完成',
+      cancelled: '本次操作已取消',
+    }[state] || '正在等待微信确认...'
+    if (new Date(res.data.expiresAt).getTime() <= Date.now()) {
+      wechatChallengeError.value = '二维码已过期，请重新发起'
+      return
+    }
+  } catch (error) {
+    wechatChallengeError.value = error?.message || '状态查询失败，请重新发起'
+    return
+  }
+  scheduleWechatPoll()
+}
+
+async function startWechat(purpose) {
+  if (wechatLoading.value) return
+  wechatLoading.value = true
+  wechatChallengeError.value = ''
+  try {
+    const inWechat = /micromessenger/i.test(navigator.userAgent)
+    const endpoint = inWechat ? `direct-${purpose}` : purpose
+    const res = await api.post(`/wechat/client/${endpoint}`, purpose === 'login' ? { channelToken: token.value } : {})
+    if (res.code !== 0 || !res.data?.id) throw new Error(res.message || '微信操作暂不可用')
+    if (inWechat) {
+      if (!/^https:\/\/open\.weixin\.qq\.com\/connect\/oauth2\/authorize\?/.test(res.data.authorizationUrl || '')) throw new Error('微信授权地址无效')
+      window.location.assign(res.data.authorizationUrl)
+      return
+    }
+    if (!res.data.scanUrl) throw new Error('微信二维码无效')
+    wechatChallenge.value = { ...res.data, purpose, state: 'pending' }
+    wechatChallengeText.value = '等待微信扫码...'
+    showWechatReminder.value = false
+    scheduleWechatPoll()
+  } catch (error) {
+    const text = error?.message || '微信操作暂不可用'
+    if (purpose === 'login') loginErr.value = text
+    else showToast(text)
+  } finally {
+    wechatLoading.value = false
+  }
+}
+
+async function finishWechat() {
+  const current = wechatChallenge.value
+  if (!current || current.state !== 'confirmed' || wechatFinishing.value) return
+  wechatFinishing.value = true
+  wechatChallengeError.value = ''
+  try {
+    const endpoint = current.purpose === 'bind' ? 'finish-bind' : 'redeem'
+    const res = await api.post(`/wechat/client/${endpoint}/${current.id}`, current.purpose === 'bind' ? { confirm: true } : {})
+    if (res.code !== 0) throw new Error(res.message || '微信操作失败')
+    clearTimeout(wechatPollTimer)
+    if (current.purpose === 'bind') {
+      wechatBinding.value = { ...wechatBinding.value, bound: true, available: true }
+      showWechatReminder.value = false
+      showToast('微信绑定成功')
+    } else {
+      localStorage.setItem('client_token', res.data.token)
+      showLogin.value = false
+      await loadMe()
+      showToast('微信登录成功')
+    }
+    wechatChallenge.value = null
+  } catch (error) {
+    wechatChallengeError.value = error?.message || '微信操作失败，请重新发起'
+  } finally {
+    wechatFinishing.value = false
+  }
+}
+
+async function closeWechatChallenge() {
+  const current = wechatChallenge.value
+  clearTimeout(wechatPollTimer)
+  wechatChallenge.value = null
+  wechatChallengeError.value = ''
+  if (!current || ['consumed', 'cancelled'].includes(current.state)) return
+  await api.post(`/wechat/client/cancel/${current.id}`, {}).catch(() => {})
+}
+
+async function unbindWechat() {
+  if (wechatLoading.value || !wechatBinding.value.bound) return
+  if (!window.confirm('解绑后，现有微信授权会话将立即失效。是否继续？')) return
+  wechatLoading.value = true
+  try {
+    const res = await api.post('/wechat/client/unbind', {})
+    if (res.code !== 0) throw new Error(res.message || '解绑失败')
+    wechatBinding.value = { bound: false, available: true, account: wechatBinding.value.account }
+    dismissWechatReminder()
+    clearClientSession()
+    socket = null
+    customer.value = null
+    conversation.value = null
+    showDashboard.value = false
+    showLogin.value = true
+    showToast('微信已解绑，请重新登录')
+  } catch (error) {
+    showToast(error?.message || '解绑失败')
+  } finally {
+    wechatLoading.value = false
   }
 }
 
@@ -987,6 +1180,7 @@ async function completeAuth(res) {
   await loadConversation()
   await loadMessages()
   setupSocket()
+  await loadWechatBinding()
   if (res.data.profileRequired) showQQModal.value = true
   requestInstallGuide()
 }
@@ -1143,7 +1337,7 @@ function openQQModal() {
 
 function openDashboard() {
   showDashboard.value = true
-  loadConversation()
+  loadConversation().then(loadWechatBinding)
 }
 
 function closeDashboard() {
@@ -2477,6 +2671,7 @@ onUnmounted(() => {
   clearInterval(codeCountdownTimer)
   clearInterval(resetCodeTimer)
   clearInterval(complaintEmailCodeTimer)
+  clearTimeout(wechatPollTimer)
   clearTimeout(toastTimer)
   clearTimeout(longPressTimer)
   sessionGeneration++

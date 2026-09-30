@@ -13,7 +13,7 @@ const { ok, error } = require('../utils');
 const { getSystemSettings } = require('../utils/systemSettings');
 
 const router = express.Router();
-const UPLOAD_DIR = path.resolve(__dirname, '..', '..', 'uploads');
+const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || path.resolve(__dirname, '..', '..', 'uploads'));
 const IMAGE_MIMES = {
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',

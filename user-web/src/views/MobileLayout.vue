@@ -1,6 +1,6 @@
 <!-- 忆梦云团队开发 - 移动端：底部 4 Tab + 企业微信风格 -->
 <script setup>
-import { clearTenantSession, readTenantCache } from '../api'
+import api, { clearTenantSession, readTenantCache } from '../api'
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
@@ -31,6 +31,8 @@ const pageTitle = computed(() => {
     '/m/profile/account': '企业套餐与用量',
     '/m/profile/about': '关于软件',
     '/m/logs': '操作日志',
+    '/m/login-devices': '登录设备',
+    '/m/login-key': '登录密钥',
     '/m/extensions': '扩展应用',
     '/m/extensions/jingpro': 'Jingpro 配置',
   }[route.path] || (route.path.startsWith('/m/announcements/') ? '公告详情' : '详情'))
@@ -52,9 +54,11 @@ function go(tab) {
 async function logout() {
   showLogoutConfirm.value = false
   const identityScope = tenantIdentityScope()
-  await clearIdentityCache(identityScope)
-  clearTenantSession()
-  router.push('/login')
+  try { await api.post('/tenant/auth/logout') } catch (_) {}
+  try { await clearIdentityCache(identityScope) } finally {
+    clearTenantSession()
+    router.replace('/login')
+  }
 }
 
 function activeIcon(tab) {

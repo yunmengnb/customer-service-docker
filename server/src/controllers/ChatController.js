@@ -14,10 +14,9 @@ const { getSystemSettings } = require('../utils/systemSettings');
 const { ok, error, generateToken, customerAvatarUrl } = require('../utils');
 const {
   validatePendingAttachment,
-  createMessageWithAttachment,
-  discardUnpublishedMessage,
   recallAttachment,
 } = require('../services/conversationAttachmentService');
+const messagePublisher = require('../services/messagePublishService');
 
 // 关联 socket.io（在 app.js 中注入）
 let io = null;
@@ -624,7 +623,8 @@ class ChatController {
     if (effectiveType === 'text' && (!content || !content.trim())) {
       return error(res, '消息内容不能为空');
     }
-    if (['image', 'video', 'file'].includes(effectiveType) && !attachmentId) {
+    const legacyQuickReplyImage = effectiveType === 'image' && /^\/uploads\//.test(String(attachmentUrl || ''));
+    if (['image', 'video', 'file'].includes(effectiveType) && !attachmentId && !legacyQuickReplyImage) {
       return error(res, '附件 ID 不能为空');
     }
     if (clientMessageId) {
@@ -660,20 +660,31 @@ class ChatController {
     const messageAt = new Date();
     let msg;
     try {
-      msg = await createMessageWithAttachment({
-        tenantId: req.tenantId,
-        conversationId: conv._id,
-        senderType: 'agent',
-        senderId: agent._id,
-        senderTypeModel: 'TenantUser',
-        messageType: effectiveType,
-        content: (content || '').trim(),
-        attachmentUrl: attachment ? '' : (attachmentUrl || ''),
-        attachmentName: attachment ? attachment.originalName : (attachmentName || ''),
-        thumbnailUrl: attachment ? '' : (effectiveType === 'video' ? (thumbnailUrl || '') : ''),
-        clientMessageId: clientMessageId || undefined,
-        createdAt: messageAt,
-      }, attachment);
+      const published = await messagePublisher.publish({
+        messageData: {
+          tenantId: req.tenantId,
+          conversationId: conv._id,
+          senderType: 'agent',
+          senderId: agent._id,
+          senderTypeModel: 'TenantUser',
+          messageType: effectiveType,
+          content: (content || '').trim(),
+          attachmentUrl: attachment ? '' : (attachmentUrl || ''),
+          attachmentName: attachment ? attachment.originalName : (attachmentName || ''),
+          thumbnailUrl: attachment ? '' : (effectiveType === 'video' ? (thumbnailUrl || '') : ''),
+          clientMessageId: clientMessageId || undefined,
+          createdAt: messageAt,
+        },
+        attachment,
+        updateConversation: messagePublisher.agentConversationUpdate({
+          _id: conv._id,
+          tenantId: req.tenantId,
+          status: 'active',
+          assignedAgentId: conv.assignedAgentId,
+        }),
+      });
+      msg = published.message;
+      conv = published.conversation;
     } catch (err) {
       if (err?.code === 11000 && clientMessageId) {
         const duplicate = await Message.findOne({
@@ -686,21 +697,6 @@ class ChatController {
         if (duplicate) return ok(res, duplicate.toJSON(), '消息已发送');
       }
       throw err;
-    }
-
-    conv = await Conversation.findOneAndUpdate(
-      {
-        _id: conv._id,
-        tenantId: req.tenantId,
-        status: 'active',
-        assignedAgentId: conv.assignedAgentId,
-      },
-      { $set: { lastMessageAt: msg.createdAt } },
-      { new: true }
-    );
-    if (!conv) {
-      await discardUnpublishedMessage(msg, attachment);
-      return error(res, '会话状态已变化，请刷新');
     }
 
     const messageData = {
@@ -1147,19 +1143,30 @@ class ChatController {
     // 记录消息
     let msg;
     try {
-      msg = await createMessageWithAttachment({
-        tenantId: customer.tenantId,
-        conversationId: conv._id,
-        senderType: 'customer',
-        senderId: customer.id,
-        senderTypeModel: 'Customer',
-        messageType: effectiveType,
-        content: (content || '').trim(),
-        attachmentUrl: attachment ? '' : (attachmentUrl || ''),
-        attachmentName: attachment ? attachment.originalName : (attachmentName || ''),
-        thumbnailUrl: attachment ? '' : (effectiveType === 'video' ? (thumbnailUrl || '') : ''),
-        clientMessageId: clientMessageId || undefined,
-      }, attachment);
+      const published = await messagePublisher.publish({
+        messageData: {
+          tenantId: customer.tenantId,
+          conversationId: conv._id,
+          senderType: 'customer',
+          senderId: customer.id,
+          senderTypeModel: 'Customer',
+          messageType: effectiveType,
+          content: (content || '').trim(),
+          attachmentUrl: attachment ? '' : (attachmentUrl || ''),
+          attachmentName: attachment ? attachment.originalName : (attachmentName || ''),
+          thumbnailUrl: attachment ? '' : (effectiveType === 'video' ? (thumbnailUrl || '') : ''),
+          clientMessageId: clientMessageId || undefined,
+        },
+        attachment,
+        updateConversation: messagePublisher.customerConversationUpdate({
+          _id: conv._id,
+          tenantId: customer.tenantId,
+          channelId: customer.channelId,
+          customerId: customer.id,
+        }),
+      });
+      msg = published.message;
+      conv = published.conversation;
     } catch (err) {
       if (err?.code === 11000 && clientMessageId) {
         const duplicate = await Message.findOne({
@@ -1174,32 +1181,7 @@ class ChatController {
       throw err;
     }
     
-    // 将“消息到达”作为最终状态更新；若与关闭并发，客户消息原子重开会话。
-    conv = await Conversation.findOneAndUpdate(
-      {
-        _id: conv._id,
-        tenantId: customer.tenantId,
-        channelId: customer.channelId,
-        customerId: customer.id,
-      },
-      [
-        {
-          $set: {
-            status: { $cond: [{ $eq: ['$status', 'closed'] }, 'waiting', '$status'] },
-            assignedAgentId: { $cond: [{ $eq: ['$status', 'closed'] }, null, '$assignedAgentId'] },
-            acceptedAt: { $cond: [{ $eq: ['$status', 'closed'] }, '$$REMOVE', '$acceptedAt'] },
-            closedAt: { $cond: [{ $eq: ['$status', 'closed'] }, '$$REMOVE', '$closedAt'] },
-            lastMessageAt: msg.createdAt,
-          },
-        },
-      ],
-      { new: true, updatePipeline: true }
-    );
-    if (!conv) {
-      await discardUnpublishedMessage(msg, attachment);
-      return error(res, '会话状态已变化，请重试');
-    }
-    
+    // 消息、附件、会话最终状态与通知 Outbox 已由统一发布服务原子提交。
     // 关键词自动回复：仅匹配文本，同优先级时精确匹配优先
     let replyMsg = null;
     if (effectiveType === 'text') {

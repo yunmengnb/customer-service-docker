@@ -31,6 +31,8 @@ const searchResultsLoading = ref(false)
 const targetMessageId = ref(null)
 let searchTimer = null
 let socketRefreshTimer = null
+let channelRefreshTimer = null
+let channelRequest = null
 let requestSequence = 0
 let activeRequestKey = ''
 let activeRequest = null
@@ -193,9 +195,29 @@ watch(selectedChannelId, () => {
   loadConversations()
 })
 
+async function loadChannels() {
+  if (channelRequest) return channelRequest
+  channelRequest = api.get('/tenant/channels').catch(() => null)
+  try {
+    const res = await channelRequest
+    if (res?.code === 0) {
+      channels.value = res.data || []
+      cacheChannels(identityScope, channels.value)
+    }
+  } finally {
+    channelRequest = null
+  }
+}
+
+function scheduleChannelRefresh() {
+  clearTimeout(channelRefreshTimer)
+  channelRefreshTimer = setTimeout(loadChannels, 250)
+}
+
 function scheduleConversationRefresh() {
   clearTimeout(socketRefreshTimer)
   socketRefreshTimer = setTimeout(loadConversations, 250)
+  scheduleChannelRefresh()
 }
 
 function setupSocket() {
@@ -208,6 +230,7 @@ function setupSocket() {
 }
 
 function handleConversationUpdated(update) {
+  scheduleChannelRefresh()
   const conversationId = String(update.conversationId?._id || update.conversationId || '')
   const index = conversations.value.findIndex((conversation) => String(conversation._id) === conversationId)
   if (index === -1) {
@@ -235,6 +258,7 @@ function cacheCurrentConversations() {
 }
 
 function handleNewMessage(message) {
+  scheduleChannelRefresh()
   const conversationId = String(message.conversationId?._id || message.conversationId || '')
   const index = conversations.value.findIndex((conversation) => String(conversation._id) === conversationId)
   if (index !== -1) {
@@ -261,6 +285,7 @@ function openChannel(channel) {
 function returnToChannels() {
   selectedId.value = null
   selectedChannelId.value = ''
+  loadChannels()
 }
 
 function selectConv(id) {
@@ -322,9 +347,29 @@ function convStatusTag(s) {
 function latestMessageText(message) {
   if (!message) return '暂无消息'
   if (message.messageType === 'image') return '[图片]'
+  if (message.messageType === 'video') return '[视频]'
   if (message.messageType === 'file') return `[文件]${message.attachmentName ? ` ${message.attachmentName}` : ''}`
   if (message.messageType === 'system' || message.senderType === 'system') return message.content || '系统消息'
   return message.content || '暂无消息'
+}
+function channelBrandName(channel) {
+  return channel.brandName || channel.name || '客服渠道'
+}
+function customerDisplayName(customer) {
+  if (!customer) return '访客'
+  if (customer.nickname && customer.nickname !== '访客') return customer.nickname
+  if (customer.qq) return `QQ ${customer.qq}`
+  if (customer.phone) return `*${customer.phone.slice(-4)}`
+  return customer.nickname || '访客'
+}
+function channelSummary(channel) {
+  const latest = channel.latestConversation
+  return latest?.lastMessage
+    ? `${customerDisplayName(latest.customer)}:${latestMessageText(latest.lastMessage)}`
+    : '暂无客户消息'
+}
+function unreadBadge(count) {
+  return count > 99 ? '99+' : count
 }
 function getAvatarColor(id) {
   const h = (id.charCodeAt(0) * 7 + id.charCodeAt(1) * 11) % 360
@@ -336,21 +381,8 @@ onMounted(async () => {
   const cachedChannels = await getCachedChannels(identityScope)
   if (cachedChannels.data.length) channels.value = cachedChannels.data
   const conversationLoad = loadConversations()
-  const channelRequest = api.get('/tenant/channels').catch(() => null)
-  if (!cachedChannels.fresh || !cachedChannels.data.length) {
-    const channelRes = await channelRequest
-    if (channelRes?.code === 0) {
-      channels.value = channelRes.data || []
-      cacheChannels(identityScope, channels.value)
-    }
-  } else {
-    channelRequest.then(channelRes => {
-      if (channelRes?.code === 0) {
-        channels.value = channelRes.data || []
-        cacheChannels(identityScope, channels.value)
-      }
-    })
-  }
+  const channelLoad = loadChannels()
+  if (!cachedChannels.fresh || !cachedChannels.data.length) await channelLoad
   await conversationLoad
   restoreScroll()
   setupSocket()
@@ -359,6 +391,7 @@ onUnmounted(() => {
   saveListState()
   clearTimeout(searchTimer)
   clearTimeout(socketRefreshTimer)
+  clearTimeout(channelRefreshTimer)
   socket?.off('conversation.created', scheduleConversationRefresh)
   socket?.off('conversation.accepted', handleConversationUpdated)
   socket?.off('conversation.updated', handleConversationUpdated)
@@ -385,11 +418,14 @@ onUnmounted(() => {
           </div>
           <div v-if="filteredChannels.length" class="msg-sider-list channel-list">
             <button v-for="channel in filteredChannels" :key="channel._id" class="channel-item" @click="openChannel(channel)">
-              <img v-if="channel.avatarUrl" v-cached-avatar="channel.avatarUrl" class="mi-avatar channel-avatar-image" :src="avatarSrc(channel.avatarUrl)" loading="lazy" decoding="async" alt="" />
-              <span v-else class="mi-avatar channel-avatar">{{ channel.name?.slice(0, 1) || '渠' }}</span>
+              <span class="channel-avatar-wrap">
+                <img v-if="channel.avatarUrl" v-cached-avatar="channel.avatarUrl" class="mi-avatar channel-avatar-image" :src="avatarSrc(channel.avatarUrl)" loading="lazy" decoding="async" alt="" />
+                <span v-else class="mi-avatar channel-avatar">{{ channelBrandName(channel).slice(0, 1) }}</span>
+                <span v-if="channel.agentUnreadCount > 0" class="channel-unread">{{ unreadBadge(channel.agentUnreadCount) }}</span>
+              </span>
               <span class="mi-body">
-                <span class="mi-row"><strong class="mi-name">{{ channel.name }}</strong><i>›</i></span>
-                <span class="mi-last">{{ channel.brandName || '客服渠道' }}</span>
+                <span class="mi-row"><strong class="mi-name">{{ channelBrandName(channel) }}</strong><i>›</i></span>
+                <span class="mi-last">{{ channelSummary(channel) }}</span>
               </span>
             </button>
           </div>
@@ -549,8 +585,10 @@ onUnmounted(() => {
 .channel-item .mi-row { margin-bottom: 4px; }
 .channel-item .mi-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .channel-item .mi-row i { color: #94a3b8; font-size: 20px; font-style: normal; }
+.channel-avatar-wrap { position: relative; flex: 0 0 auto; }
 .channel-avatar { display: grid; place-items: center; border-radius: 12px; background: #dbeafe; color: #2563eb; }
 .channel-avatar-image { border-radius: 12px; }
+.channel-unread { position: absolute; top: -6px; left: -6px; min-width: 18px; height: 18px; padding: 0 4px; display: grid; place-items: center; box-sizing: border-box; border: 2px solid #fff; border-radius: 999px; background: #ef4444; color: #fff; font-size: 9px; font-weight: 700; line-height: 1; }
 .channel-context-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px; }
 .channel-back { padding: 0; border: 0; background: transparent; color: #2563eb; font-size: 12px; cursor: pointer; }
 .channel-current-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

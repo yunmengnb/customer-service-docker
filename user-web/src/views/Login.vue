@@ -2,28 +2,27 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import api from '../api'
+import api, { getDeviceInfo } from '../api'
 import AuthCaptcha from '../components/AuthCaptcha.vue'
 
 const router = useRouter()
 const route = useRoute()
 const form = ref({ username: '', password: '', tenant: '' })
 const loginMode = ref('password')
-const employeeToken = ref('')
+const loginKey = ref('')
 const registerEnabled = ref(true)
 const loginEnabled = ref(true)
 const captcha = ref(null)
 const err = ref('')
 const needsTenant = ref(false)
 const loading = ref(false)
-const invalidEmployeeTokenReasons = new Set([
-  'EMPLOYEE_TOKEN_MISSING',
-  'EMPLOYEE_TOKEN_MALFORMED',
-  'EMPLOYEE_TOKEN_UNKNOWN',
-  'EMPLOYEE_TOKEN_INVALID',
-  'EMPLOYEE_TOKEN_USED',
-  'EMPLOYEE_TOKEN_UNRECOGNIZED',
-  'EMPLOYEE_TOKEN_UNAVAILABLE',
+const invalidKeyReasons = new Set([
+  'LOGIN_KEY_MISSING',
+  'LOGIN_KEY_MALFORMED',
+  'LOGIN_KEY_UNKNOWN',
+  'LOGIN_KEY_INVALID',
+  'LOGIN_KEY_REVOKED',
+  'LOGIN_KEY_UNAVAILABLE',
 ])
 
 const notice = computed(() => {
@@ -32,17 +31,10 @@ const notice = computed(() => {
   return ''
 })
 
-function employeeTokenErrorMessage(error) {
-  if (
-    error?.reason === 'EMPLOYEE_TOKEN_EXPIRED'
-    || Number(error?.code) === 401011
-  ) return '密钥已过期'
-
-  if (
-    invalidEmployeeTokenReasons.has(error?.reason)
-    || Number(error?.code) === 401010
-  ) return '密钥错误'
-
+function keyErrorMessage(error) {
+  if (error?.reason === 'LOGIN_KEY_EXPIRED' || Number(error?.code) === 401011) return '登录密钥已过期'
+  if (error?.reason === 'LOGIN_KEY_USED' || Number(error?.code) === 401012) return '登录密钥已使用，请重新生成'
+  if (invalidKeyReasons.has(error?.reason) || Number(error?.code) === 401010) return '登录密钥错误'
   if (error?.isNetworkError) return '网络错误，请稍后重试'
   return error?.message || '登录失败，请稍后重试'
 }
@@ -56,6 +48,7 @@ function saveLogin(data) {
   localStorage.setItem('tenant_user', JSON.stringify(data.user))
   localStorage.setItem('tenant_info', JSON.stringify(data.tenant))
   const target = typeof route.query.redirect === 'string' ? route.query.redirect : (data.redirect || '/messages')
+  window.alert('登录成功')
   router.replace(target)
 }
 
@@ -63,13 +56,14 @@ async function doLogin() {
   if (!loginEnabled.value) return err.value = '客服登录暂时关闭，有问题请联系管理员'
   if (loading.value) return
   err.value = ''
-  if (loginMode.value === 'token' && !employeeToken.value.trim()) return err.value = '请粘贴员工密钥'
+  if (loginMode.value === 'key' && !loginKey.value.trim()) return err.value = '请输入登录密钥'
   if (loginMode.value === 'password' && (!form.value.username || !form.value.password)) return err.value = '请填写完整'
   loading.value = true
   try {
-    const res = loginMode.value === 'token'
-      ? await api.post('/integration/employee-token-login', { token: employeeToken.value.trim() })
-      : await api.post('/tenant/auth/login', { ...form.value, ...await captcha.value.verify() })
+    const device = getDeviceInfo()
+    const res = loginMode.value === 'key'
+      ? await api.post('/tenant/auth/key-login', { key: loginKey.value.trim(), ...device })
+      : await api.post('/tenant/auth/login', { ...form.value, ...device, ...await captcha.value.verify() })
     if (res.code === 0 || res.code === 200) {
       saveLogin(res.data)
     } else {
@@ -77,8 +71,8 @@ async function doLogin() {
       if (res.code === 4092) needsTenant.value = true
     }
   } catch (e) {
-    err.value = loginMode.value === 'token'
-      ? employeeTokenErrorMessage(e)
+    err.value = loginMode.value === 'key'
+      ? keyErrorMessage(e)
       : (e?.message || (e?.isNetworkError ? '网络错误，请稍后重试' : '登录失败'))
     if (e?.code === 4092 || e?.httpStatus === 409) needsTenant.value = true
     await captcha.value?.reset()
@@ -133,7 +127,7 @@ onMounted(async () => {
         <header class="form-heading">
           <span class="form-eyebrow">WELCOME BACK</span>
           <h1 id="login-title">登录客服后台</h1>
-          <p>管理员与员工使用同一入口</p>
+          <p>使用账号密码或登录密钥进入工作台</p>
         </header>
 
         <div v-if="loginEnabled" class="login-tabs" role="tablist" aria-label="登录方式">
@@ -147,10 +141,10 @@ onMounted(async () => {
           <button
             type="button"
             role="tab"
-            :aria-selected="loginMode === 'token'"
-            :class="{ active: loginMode === 'token' }"
-            @click="loginMode = 'token'; err = ''"
-          >员工临时密钥</button>
+            :aria-selected="loginMode === 'key'"
+            :class="{ active: loginMode === 'key' }"
+            @click="loginMode = 'key'; err = ''"
+          >密钥方式登录</button>
         </div>
 
         <form v-if="loginEnabled" class="login-form" @submit.prevent="doLogin">
@@ -187,9 +181,9 @@ onMounted(async () => {
 
           <template v-else>
             <label class="field token-field">
-              <span class="field-label">员工临时密钥</span>
-              <textarea v-model.trim="employeeToken" rows="5" autocomplete="off" spellcheck="false" placeholder="请粘贴 Jingpro 员工临时登录密钥" @keyup.ctrl.enter="doLogin"></textarea>
-              <span class="field-help">临时密钥具有时效性，请在生成后尽快使用；可按 Ctrl + Enter 登录</span>
+              <span class="field-label">登录密钥</span>
+              <textarea v-model.trim="loginKey" rows="5" autocomplete="off" spellcheck="false" placeholder="请输入登录密钥" @keyup.ctrl.enter="doLogin"></textarea>
+              <span class="field-help">请妥善保管登录密钥；可按 Ctrl + Enter 登录</span>
             </label>
           </template>
 
@@ -206,7 +200,7 @@ onMounted(async () => {
 
           <button type="submit" class="primary" :disabled="loading">
             <span v-if="loading" class="loading-spinner" aria-hidden="true"></span>
-            {{ loading ? '正在登录...' : (loginMode === 'token' ? '使用密钥登录' : '登录客服后台') }}
+            {{ loading ? '正在登录...' : (loginMode === 'key' ? '使用密钥登录' : '登录客服后台') }}
             <svg v-if="!loading" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
           </button>
         </form>

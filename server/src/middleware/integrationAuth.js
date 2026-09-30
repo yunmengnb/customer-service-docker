@@ -1,23 +1,13 @@
+// 忆梦云团队开发
 const crypto = require('crypto');
 const IntegrationNonce = require('../models/IntegrationNonce');
 const TenantIntegration = require('../models/TenantIntegration');
-const SystemConfig = require('../models/SystemConfig');
+const { getPlatformExtension, tenantAllowed } = require('../services/extensionPlatformService');
 
 const JINGPRO_SETTING_KEY = 'jingpro.setting';
-const JINGPRO_DEFAULTS = {
-  enabled: false,
-  serverBaseUrl: process.env.SERVER_BASE_URL || process.env.API_BASE_URL || '',
-  widgetBaseUrl: process.env.WEB_BASE_URL || '',
-};
 
 async function getJingproPlatformSetting() {
-  const value = await SystemConfig.get(JINGPRO_SETTING_KEY, {});
-  const stored = value && typeof value === 'object' ? value : {};
-  return {
-    enabled: stored.enabled === true,
-    serverBaseUrl: String(stored.serverBaseUrl || JINGPRO_DEFAULTS.serverBaseUrl),
-    widgetBaseUrl: String(stored.widgetBaseUrl || JINGPRO_DEFAULTS.widgetBaseUrl),
-  };
+  return getPlatformExtension('jingpro');
 }
 
 function buildCanonical(method, path, ts, nonce, rawBody) {
@@ -31,6 +21,10 @@ function buildCanonical(method, path, ts, nonce, rawBody) {
 function signRequest(method, path, ts, nonce, rawBody, secret) {
   const canonical = buildCanonical(method, path, ts, nonce, rawBody);
   return crypto.createHmac('sha256', String(secret || '')).update(canonical, 'utf8').digest('hex');
+}
+
+function multipartSignatureInput(fileSha256, fileSize) {
+  return `file-sha256:${String(fileSha256 || '').toLowerCase()}\nfile-size:${String(fileSize)}`;
 }
 
 async function consumeNonce(nonce, scope, ttlMs = 600 * 1000) {
@@ -90,7 +84,7 @@ function jwtVerifyHS256(token, secret) {
   return decodeJwtPart(parts[1]);
 }
 
-async function integrationAuth(req, res, next) {
+async function authenticateIntegration(req, res, next, requireActive) {
   const keyId = String(req.header('X-Integration-Key') || '').trim();
   const ts = String(req.header('X-Timestamp') || '');
   const nonce = String(req.header('X-Nonce') || '');
@@ -106,16 +100,32 @@ async function integrationAuth(req, res, next) {
   if (!platformSetting.enabled) {
     return res.status(403).json({ code: 403006, msg: 'Jingpro integration is disabled', data: null });
   }
-  const connection = await TenantIntegration.findOne({ keyId, provider: 'jingpro', enabled: true }).select('+platformSecret').exec();
+  const connectionQuery = { keyId, provider: 'jingpro', enabled: true };
+  if (requireActive) connectionQuery.status = 'active';
+  const connection = await TenantIntegration.findOne(connectionQuery).select('+platformSecret').exec();
   if (!connection || !connection.platformSecret) {
-    return res.status(403).json({ code: 403002, msg: 'Integration connection not found or disabled', data: null });
+    return res.status(403).json({ code: 403002, msg: requireActive ? 'Integration connection not active' : 'Integration connection not found or disabled', data: null });
+  }
+  if (!tenantAllowed(platformSetting, connection.tenantId)) {
+    return res.status(403).json({ code: 403006, msg: 'Tenant is not authorized for Jingpro integration', data: null });
   }
   const tsNum = Number(ts);
   if (!Number.isFinite(tsNum) || Math.abs(Date.now() / 1000 - tsNum) > 300) {
     return res.status(403).json({ code: 403003, msg: 'Request timestamp expired (±300s allowed)', data: { serverTs: Math.floor(Date.now() / 1000), clientTs: tsNum } });
   }
   const isMultipart = /^multipart\/form-data\b/i.test(String(req.headers['content-type'] || ''));
-  const rawBody = isMultipart ? '' : (typeof req.rawBody === 'string' ? req.rawBody : (req.rawBody && Buffer.isBuffer(req.rawBody) ? req.rawBody.toString('utf8') : (req.body && typeof req.body !== 'string' ? JSON.stringify(req.body) : '')));
+  let rawBody;
+  if (isMultipart) {
+    const fileSha256 = String(req.header('X-File-SHA256') || '').trim().toLowerCase();
+    const fileSize = String(req.header('X-File-Size') || '').trim();
+    if (!/^[a-f0-9]{64}$/.test(fileSha256) || !/^(0|[1-9]\d*)$/.test(fileSize)) {
+      return res.status(403).json({ code: 403008, msg: 'Multipart requests require valid X-File-SHA256 and X-File-Size headers', data: null });
+    }
+    rawBody = multipartSignatureInput(fileSha256, fileSize);
+    req.integrationSignedFile = { sha256: fileSha256, size: Number(fileSize) };
+  } else {
+    rawBody = typeof req.rawBody === 'string' ? req.rawBody : (req.rawBody && Buffer.isBuffer(req.rawBody) ? req.rawBody.toString('utf8') : (req.body && typeof req.body !== 'string' ? JSON.stringify(req.body) : ''));
+  }
   const path = String(req.originalUrl || req.url || '').split('?')[0];
   const expected = signRequest(req.method, path, ts, nonce, rawBody, connection.platformSecret);
   if (!timingSafeEqual(expected, sig)) {
@@ -138,15 +148,38 @@ async function integrationAuth(req, res, next) {
   next();
 }
 
+function integrationAuth(req, res, next) {
+  return authenticateIntegration(req, res, next, true);
+}
+
+function integrationPingAuth(req, res, next) {
+  return authenticateIntegration(req, res, next, false);
+}
+
+function verifyMultipartFile(req, res, next) {
+  if (!req.file || !req.integrationSignedFile) {
+    return res.status(403).json({ code: 403008, msg: 'Signed multipart file is required', data: null });
+  }
+  const actualSha256 = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
+  const actualSize = req.file.buffer.length;
+  if (actualSize !== req.integrationSignedFile.size || !timingSafeEqual(actualSha256, req.integrationSignedFile.sha256)) {
+    return res.status(403).json({ code: 403009, msg: 'Multipart file digest or size mismatch', data: null });
+  }
+  next();
+}
+
 module.exports = {
   JINGPRO_SETTING_KEY,
   getJingproPlatformSetting,
   buildCanonical,
   signRequest,
+  multipartSignatureInput,
   consumeNonce,
   consumeJti,
   timingSafeEqual,
   jwtDecodeHeader,
   jwtVerifyHS256,
   integrationAuth,
+  integrationPingAuth,
+  verifyMultipartFile,
 };

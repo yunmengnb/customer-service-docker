@@ -1,6 +1,7 @@
 // 忆梦云团队开发
 const PlatformAdmin = require('../models/PlatformAdmin');
 const { ok, error, hashPassword, comparePassword, signToken, passwordVersion } = require('../utils');
+const migrationControl = require('../services/migrationControl');
 
 class AdminAuthController {
   // POST /api/admin/auth/login
@@ -36,12 +37,14 @@ class AdminAuthController {
     admin.lastLoginAt = new Date();
     await admin.save();
     
+    const pointer = await migrationControl.readPointer();
     const token = signToken({
       type: 'admin',
       id: admin._id.toString(),
       username: admin.username,
       role: admin.role,
       pv: passwordVersion(admin.password),
+      dg: pointer.generation,
     });
     
     return ok(res, {
@@ -79,8 +82,9 @@ class AdminAuthController {
     if (avatarUrl !== undefined) admin.avatarUrl = avatarUrl.trim();
     await admin.save();
 
+    const pointer = await migrationControl.readPointer();
     const token = signToken({
-      type: 'admin', id: admin._id.toString(), username: admin.username, role: admin.role, pv: passwordVersion(admin.password),
+      type: 'admin', id: admin._id.toString(), username: admin.username, role: admin.role, pv: passwordVersion(admin.password), dg: pointer.generation,
     });
     return ok(res, { token, admin: admin.toJSON() }, '资料已更新');
   }

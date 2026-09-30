@@ -18,6 +18,16 @@ const routes = [
     component: () => import('./views/AgreementPage.vue'),
   },
   {
+    path: '/wechat-client-confirm',
+    name: 'wechat-client-confirm',
+    component: () => import('./views/WechatClientConfirmPage.vue'),
+  },
+  {
+    path: '/wechat-notification',
+    name: 'wechat-notification',
+    component: () => import('./views/WechatNotificationPage.vue'),
+  },
+  {
     path: '/',
     redirect: () => localStorage.getItem('client_token') ? '/account' : '/c/default',
   },

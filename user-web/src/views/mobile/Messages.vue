@@ -29,6 +29,8 @@ const searchResults = ref([])
 const searchResultsLoading = ref(false)
 let searchTimer = null
 let socketRefreshTimer = null
+let channelRefreshTimer = null
+let channelRequest = null
 let requestSequence = 0
 let activeRequestKey = ''
 let activeRequest = null
@@ -194,11 +196,32 @@ watch(selectedChannelId, () => {
 watch(() => route.query.channelId, (channelId) => {
   const nextId = typeof channelId === 'string' ? channelId : ''
   if (nextId !== selectedChannelId.value) selectedChannelId.value = nextId
+  if (!nextId) loadChannels()
 })
+
+async function loadChannels() {
+  if (channelRequest) return channelRequest
+  channelRequest = api.get('/tenant/channels').catch(() => null)
+  try {
+    const res = await channelRequest
+    if (res?.code === 0) {
+      channels.value = res.data || []
+      cacheChannels(identityScope, channels.value)
+    }
+  } finally {
+    channelRequest = null
+  }
+}
+
+function scheduleChannelRefresh() {
+  clearTimeout(channelRefreshTimer)
+  channelRefreshTimer = setTimeout(loadChannels, 250)
+}
 
 function scheduleConversationRefresh() {
   clearTimeout(socketRefreshTimer)
   socketRefreshTimer = setTimeout(loadConversations, 250)
+  scheduleChannelRefresh()
 }
 
 function setupSocket() {
@@ -211,6 +234,7 @@ function setupSocket() {
 }
 
 function handleConversationUpdated(update) {
+  scheduleChannelRefresh()
   const conversationId = String(update.conversationId?._id || update.conversationId || '')
   const index = conversations.value.findIndex((conversation) => String(conversation._id) === conversationId)
   if (index === -1) {
@@ -242,6 +266,7 @@ function cacheCurrentConversations() {
 }
 
 function handleNewMessage(message) {
+  scheduleChannelRefresh()
   const conversationId = String(message.conversationId?._id || message.conversationId || '')
   const index = conversations.value.findIndex((conversation) => String(conversation._id) === conversationId)
   if (index !== -1) {
@@ -321,9 +346,30 @@ function statusTag(status) {
 function latestMessageText(message) {
   if (!message) return '暂无消息'
   if (message.messageType === 'image') return '[图片]'
+  if (message.messageType === 'video') return '[视频]'
   if (message.messageType === 'file') return `[文件]${message.attachmentName ? ` ${message.attachmentName}` : ''}`
   if (message.messageType === 'system' || message.senderType === 'system') return message.content || '系统消息'
   return message.content || '暂无消息'
+}
+
+function channelBrandName(channel) {
+  return channel.brandName || channel.name || '客服渠道'
+}
+function customerDisplayName(customer) {
+  if (!customer) return '访客'
+  if (customer.nickname && customer.nickname !== '访客') return customer.nickname
+  if (customer.qq) return `QQ ${customer.qq}`
+  if (customer.phone) return `*${customer.phone.slice(-4)}`
+  return customer.nickname || '访客'
+}
+function channelSummary(channel) {
+  const latest = channel.latestConversation
+  return latest?.lastMessage
+    ? `${customerDisplayName(latest.customer)}:${latestMessageText(latest.lastMessage)}`
+    : '暂无客户消息'
+}
+function unreadBadge(count) {
+  return count > 99 ? '99+' : count
 }
 
 function avatarColor(id) {
@@ -339,21 +385,8 @@ onMounted(async () => {
   const cachedChannels = await getCachedChannels(identityScope)
   if (cachedChannels.data.length) channels.value = cachedChannels.data
   const conversationLoad = loadConversations()
-  const channelRequest = api.get('/tenant/channels').catch(() => null)
-  if (!cachedChannels.fresh || !cachedChannels.data.length) {
-    const channelRes = await channelRequest
-    if (channelRes?.code === 0) {
-      channels.value = channelRes.data || []
-      cacheChannels(identityScope, channels.value)
-    }
-  } else {
-    channelRequest.then(channelRes => {
-      if (channelRes?.code === 0) {
-        channels.value = channelRes.data || []
-        cacheChannels(identityScope, channels.value)
-      }
-    })
-  }
+  const channelLoad = loadChannels()
+  if (!cachedChannels.fresh || !cachedChannels.data.length) await channelLoad
   if (selectedChannelId.value) syncQuery()
   await conversationLoad
   restoreScroll()
@@ -364,6 +397,7 @@ onUnmounted(() => {
   scrollElement()?.removeEventListener('scroll', saveListState)
   clearTimeout(searchTimer)
   clearTimeout(socketRefreshTimer)
+  clearTimeout(channelRefreshTimer)
   socket?.off('conversation.created', scheduleConversationRefresh)
   socket?.off('conversation.accepted', handleConversationUpdated)
   socket?.off('conversation.updated', handleConversationUpdated)
@@ -385,9 +419,12 @@ onUnmounted(() => {
       </div>
       <div v-if="filteredChannels.length" class="mobile-channel-list">
         <button v-for="channel in filteredChannels" :key="channel._id" @click="openChannel(channel)">
-          <img v-if="channel.avatarUrl" v-cached-avatar="channel.avatarUrl" :src="avatarSrc(channel.avatarUrl)" loading="lazy" decoding="async" alt="" />
-          <span v-else class="mobile-channel-avatar">{{ channel.name?.slice(0, 1) || '渠' }}</span>
-          <span><strong>{{ channel.name }}</strong><small>{{ channel.brandName || '客服渠道' }}</small></span>
+          <span class="mobile-channel-avatar-wrap">
+            <img v-if="channel.avatarUrl" v-cached-avatar="channel.avatarUrl" :src="avatarSrc(channel.avatarUrl)" loading="lazy" decoding="async" alt="" />
+            <span v-else class="mobile-channel-avatar">{{ channelBrandName(channel).slice(0, 1) }}</span>
+            <span v-if="channel.agentUnreadCount > 0" class="mobile-channel-unread">{{ unreadBadge(channel.agentUnreadCount) }}</span>
+          </span>
+          <span><strong>{{ channelBrandName(channel) }}</strong><small>{{ channelSummary(channel) }}</small></span>
           <i>›</i>
         </button>
       </div>
@@ -473,8 +510,10 @@ onUnmounted(() => {
 .mobile-channel-search input { width: 100%; min-height: 42px; padding: 0 14px; border: 1px solid #e2e8f0; border-radius: 12px; background: #fff; color: #0f172a; font-size: 14px; outline: none; box-sizing: border-box; }
 .mobile-channel-search input:focus { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,.12); }
 .mobile-channel-list > button { width: 100%; display: flex; align-items: center; gap: 12px; padding: 15px 16px; border: 0; border-bottom: 1px solid #f1f5f9; background: #fff; color: inherit; text-align: left; }
+.mobile-channel-avatar-wrap { position: relative; width: 46px; height: 46px; flex: 0 0 auto; }
 .mobile-channel-list img, .mobile-channel-avatar { width: 46px; height: 46px; flex: 0 0 auto; border-radius: 12px; object-fit: cover; }
 .mobile-channel-avatar { display: grid; place-items: center; background: #dbeafe; color: #2563eb; font-size: 18px; font-weight: 700; }
+.mobile-channel-unread { position: absolute; top: -6px; left: -6px; min-width: 19px; height: 19px; padding: 0 4px; display: grid; place-items: center; box-sizing: border-box; border: 2px solid #fff; border-radius: 999px; background: #ef4444; color: #fff; font-size: 9px; font-weight: 700; line-height: 1; }
 .mobile-channel-list button > span:nth-child(2) { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; }
 .mobile-channel-list strong, .mobile-channel-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mobile-channel-list strong { color: #0f172a; font-size: 15px; }

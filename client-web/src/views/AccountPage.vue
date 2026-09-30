@@ -61,6 +61,13 @@
         </template>
         <div v-if="authMessage" :class="['password-feedback', authSuccess ? 'success' : 'error']">{{ authMessage }}</div>
         <button type="button" class="dashboard-primary" :disabled="authLoading || (authTab !== 'forgot' && captchaLoading)" @click="submitAuth">{{ authLoading ? '处理中...' : (authTab === 'login' ? '登录' : (authTab === 'register' ? '注册' : '重置密码')) }}</button>
+        <div v-if="authTab === 'login'" class="wechat-auth-entry">
+          <span>或</span>
+          <button type="button" :disabled="wechatLoading || !channelToken" @click="startWechatLogin">
+            {{ wechatLoading ? '正在发起...' : '使用微信授权登录' }}
+          </button>
+          <small>{{ channelToken ? '只会显示当前客服渠道中已绑定的身份' : '请先从客服链接进入，以确认要登录的企业和渠道' }}</small>
+        </div>
       </section>
 
       <template v-else>
@@ -117,6 +124,24 @@
         </form>
       </template>
     </main>
+
+    <div v-if="wechatChallenge" class="modal-overlay wechat-challenge-overlay" @click.self="closeWechatChallenge">
+      <section class="modal-content wechat-challenge-modal" role="dialog" aria-modal="true" aria-labelledby="account-wechat-title">
+        <button type="button" class="dashboard-close wechat-challenge-close" aria-label="关闭微信登录" @click="closeWechatChallenge">×</button>
+        <div class="wechat-challenge-icon">微</div>
+        <div id="account-wechat-title" class="modal-title">微信授权登录</div>
+        <div class="modal-desc">使用微信扫描二维码，并在微信内核对公众号、渠道和安全短语后选择身份并确认。</div>
+        <img class="wechat-qr-image" :src="wechatChallenge.scanUrl" alt="微信公众号授权二维码" />
+        <div class="wechat-phrase-box"><span>安全短语</span><strong>{{ wechatChallenge.phrase }}</strong></div>
+        <div :class="['wechat-challenge-status', wechatChallengeError ? 'error' : '']">{{ wechatChallengeError || wechatChallengeText }}</div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" @click="closeWechatChallenge">取消</button>
+          <button type="button" class="btn btn-primary" :disabled="wechatFinishing || wechatChallenge.state !== 'confirmed'" @click="finishWechatLogin">
+            {{ wechatFinishing ? '登录中...' : '完成登录' }}
+          </button>
+        </div>
+      </section>
+    </div>
 
     <div v-if="showDownloadModal && !isCustomerAndroidApp" class="modal-overlay install-guide-overlay" @click.self="showDownloadModal = false">
       <section class="modal-content install-guide-modal" role="dialog" aria-modal="true" aria-labelledby="account-download-title">
@@ -188,9 +213,15 @@ const isCustomerAndroidApp = /YiMengCustomerAndroid\/[\w.-]+/i.test(userAgent)
 const showDownloadModal = ref(false)
 const appDownloadLoading = ref(false)
 const appDownloadError = ref('')
+const wechatLoading = ref(false)
+const wechatFinishing = ref(false)
+const wechatChallenge = ref(null)
+const wechatChallengeError = ref('')
+const wechatChallengeText = ref('等待微信扫码...')
 let codeTimer = null
 let resetCodeTimer = null
 let passwordCodeTimer = null
+let wechatPollTimer = null
 let socket = null
 let notificationAudioContext = null
 let geetestInstance = null
@@ -399,6 +430,109 @@ async function changePassword() {
     await clearIdentityCache(clientIdentityScope(customer.value)); localStorage.removeItem('client_token'); setTimeout(() => { customer.value = null; authTab.value = 'login'; passwordMessage.value = ''; loadCaptcha() }, 1000)
   } catch (error) { passwordMessage.value = error?.message || '密码修改失败' } finally { passwordLoading.value = false }
 }
+async function startWechatLogin() {
+  if (wechatLoading.value) return
+  authMessage.value = ''
+
+  if (!channelToken.value) {
+    authMessage.value = '请先从客服链接进入，以确认要登录的企业和渠道'
+    return
+  }
+
+  wechatLoading.value = true
+  wechatChallengeError.value = ''
+
+  try {
+    const res = await api.post('/wechat/client/login', {
+      channelToken: channelToken.value,
+    })
+
+    if (res.code !== 0 || !res.data?.id || !res.data?.scanUrl) {
+      throw new Error(res.message || '微信登录暂不可用')
+    }
+
+    wechatChallenge.value = {
+      ...res.data,
+      purpose: 'login',
+      state: 'pending',
+    }
+    wechatChallengeText.value = /micromessenger/i.test(userAgent)
+      ? '当前在微信内打开。可使用另一设备扫码，或长按二维码识别。'
+      : '等待微信扫码...'
+    scheduleWechatPoll()
+  } catch (error) {
+    authMessage.value = error?.message || '微信登录暂不可用'
+  } finally {
+    wechatLoading.value = false
+  }
+}
+
+function scheduleWechatPoll() {
+  clearTimeout(wechatPollTimer)
+  if (!wechatChallenge.value || ['cancelled', 'consumed', 'expired'].includes(wechatChallenge.value.state)) return
+  wechatPollTimer = setTimeout(pollWechatStatus, 1600)
+}
+
+async function pollWechatStatus() {
+  const current = wechatChallenge.value
+  if (!current) return
+
+  try {
+    const res = await api.get(`/wechat/client/status/${current.id}`)
+    if (!wechatChallenge.value || wechatChallenge.value.id !== current.id || res.code !== 0) return
+
+    const state = res.data.state
+    wechatChallenge.value = { ...wechatChallenge.value, state }
+    wechatChallengeText.value = {
+      pending: '等待微信扫码...',
+      scanned: '已扫码，请在微信中点击链接继续验证',
+      oauth_verified: '微信身份已验证，请在微信中选择身份并明确确认',
+      confirmed: '微信端已确认，请在此浏览器完成登录',
+      consumed: '本次登录已完成',
+      cancelled: '本次登录已取消',
+    }[state] || '正在等待微信确认...'
+
+    if (new Date(res.data.expiresAt).getTime() <= Date.now()) {
+      wechatChallengeError.value = '二维码已过期，请关闭后重新发起'
+      return
+    }
+  } catch (error) {
+    wechatChallengeError.value = error?.message || '状态查询失败，请重新发起'
+    return
+  }
+
+  scheduleWechatPoll()
+}
+
+async function finishWechatLogin() {
+  const current = wechatChallenge.value
+  if (!current || current.state !== 'confirmed' || wechatFinishing.value) return
+  wechatFinishing.value = true
+  wechatChallengeError.value = ''
+
+  try {
+    const res = await api.post(`/wechat/client/redeem/${current.id}`, {})
+    if (res.code !== 0 || !res.data?.token) throw new Error(res.message || '微信登录失败')
+    clearTimeout(wechatPollTimer)
+    localStorage.setItem('client_token', res.data.token)
+    wechatChallenge.value = null
+    await loadAccount()
+  } catch (error) {
+    wechatChallengeError.value = error?.message || '微信登录失败，请重新发起'
+  } finally {
+    wechatFinishing.value = false
+  }
+}
+
+async function closeWechatChallenge() {
+  const current = wechatChallenge.value
+  clearTimeout(wechatPollTimer)
+  wechatChallenge.value = null
+  wechatChallengeError.value = ''
+  if (!current || ['consumed', 'cancelled'].includes(current.state)) return
+  await api.post(`/wechat/client/cancel/${current.id}`, {}).catch(() => {})
+}
+
 function openChannel(item) { if (item.publicToken) router.push(`/c/${item.publicToken}`) }
 function messageSummary(message) {
   if (!message) return '暂无消息'
@@ -530,6 +664,7 @@ onBeforeUnmount(() => {
   clearInterval(codeTimer)
   clearInterval(resetCodeTimer)
   clearInterval(passwordCodeTimer)
+  clearTimeout(wechatPollTimer)
   geetestInstance?.destroy?.()
   socket?.off('channel-history.updated', handleChannelHistoryUpdate)
   socket?.off('message.new', handleNewMessage)

@@ -130,7 +130,7 @@ async function issuePlayback(req, res) {
   const expiresAt = Math.min(Date.now() + PLAYBACK_SECONDS * 1000, subject.exp * 1000 || Infinity);
   if (expiresAt <= Date.now()) return error(res, '登录已过期', 4012, 401);
   const identity = {};
-  for (const key of ['type', 'id', 'accountId', 'tenantId', 'channelId', 'conversationId', 'identity', 'pv']) {
+  for (const key of ['type', 'sid', 'id', 'accountId', 'tenantId', 'channelId', 'conversationId', 'identity', 'pv']) {
     if (subject[key] !== undefined) identity[key] = subject[key];
   }
   const credential = jwt.sign({ purpose: 'video', attachmentId: String(attachment._id), nonce, identity,

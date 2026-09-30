@@ -2,7 +2,7 @@
 package com.user.ymykf;
 
 final class AppConfig {
-    static final String ORIGIN = "https://user.by0.me";
+    static final String ORIGIN = "https://user.czez.top";
     static final String MESSAGES_URL = ORIGIN + "/m/messages";
     static final String ANNOUNCEMENTS_URL = ORIGIN + "/m/announcements";
     static final String ANNOUNCEMENTS_API_URL = ORIGIN + "/api/app/announcements";

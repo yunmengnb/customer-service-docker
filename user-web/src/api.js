@@ -20,6 +20,33 @@ export function clearTenantSession() {
   // 保留隔离标志直到显式登录成功，401 后重复退出也不能回落或清除原管理员身份。
 }
 
+const DEVICE_ID_KEY = 'tenant_device_id'
+
+function createDeviceId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID()
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, character => {
+    const random = Math.random() * 16 | 0
+    return (character === 'x' ? random : (random & 0x3 | 0x8)).toString(16)
+  })
+}
+
+function getDeviceName() {
+  const browserNavigator = typeof navigator === 'undefined' ? {} : navigator
+  const source = `${browserNavigator.platform || ''} ${browserNavigator.userAgent || ''}`
+  const system = /Windows/i.test(source) ? 'Windows' : /Android/i.test(source) ? 'Android' : /iPhone|iPad|iPod/i.test(source) ? 'iOS' : /Mac/i.test(source) ? 'macOS' : /Linux/i.test(source) ? 'Linux' : '未知系统'
+  const browser = /Edg\//i.test(source) ? 'Edge' : /Chrome\//i.test(source) ? 'Chrome' : /Firefox\//i.test(source) ? 'Firefox' : /Safari\//i.test(source) ? 'Safari' : '浏览器'
+  return `${system} · ${browser}`
+}
+
+export function getDeviceInfo() {
+  let deviceId = localStorage.getItem(DEVICE_ID_KEY)
+  if (!deviceId) {
+    deviceId = createDeviceId()
+    localStorage.setItem(DEVICE_ID_KEY, deviceId)
+  }
+  return { deviceId, deviceName: getDeviceName(), clientType: 'web' }
+}
+
 const api = axios.create({ baseURL: '/api', timeout: 15000 })
 
 function isSameOriginApiRequest(config) {
@@ -33,7 +60,13 @@ function isSameOriginApiRequest(config) {
 api.interceptors.request.use(config => {
   const impersonating = sessionStorage.getItem('tenant_impersonation') === '1'
   const token = sessionStorage.getItem('tenant_token') || (!impersonating ? localStorage.getItem('tenant_token') : '')
-  if (token && isSameOriginApiRequest(config)) config.headers.Authorization = `Bearer ${token}`
+  if (isSameOriginApiRequest(config)) {
+    const device = getDeviceInfo()
+    if (token) config.headers.Authorization = `Bearer ${token}`
+    config.headers['x-device-id'] = device.deviceId
+    config.headers['x-device-name'] = device.deviceName
+    config.headers['x-client-type'] = device.clientType
+  }
   // #region debug-point E:blob-request-start
   if (config.responseType === 'blob') {
     config._debugBlobStartedAt = Date.now()

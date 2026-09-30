@@ -2,12 +2,27 @@
 const mongoose = require('mongoose');
 const Tenant = require('../models/Tenant');
 const TenantUser = require('../models/TenantUser');
-const { ok, error, hashPassword, comparePassword, signToken, passwordVersion } = require('../utils');
+const TenantUserLoginKey = require('../models/TenantUserLoginKey');
+const TenantUserSession = require('../models/TenantUserSession');
+const { ok, error, hashPassword, comparePassword } = require('../utils');
 const { getSystemSettings, authSettings } = require('../utils/systemSettings');
 const { normalizeEmail, sendEmailCode, verifyEmailCode } = require('../utils/emailVerification');
 const { recordLogin, recordOperation } = require('../services/auditLogService');
+const {
+  createSessionAndToken,
+  revokeSession,
+  signForSession,
+} = require('../services/tenantSessionService');
+const {
+  consumeTemporaryLoginKey,
+  generateTemporaryLoginKey,
+} = require('../services/tenantLoginKeyService');
 
 const REGISTER_DISABLED_MESSAGE = '暂时无法注册，有问题请联系管理员';
+
+function normalizeUsername(value) {
+  return String(value || '').trim().toLowerCase();
+}
 
 async function emailInUse(email, excludeTenantId) {
   if (!email) return false;
@@ -18,18 +33,6 @@ async function emailInUse(email, excludeTenantId) {
     TenantUser.exists({ email }),
   ]);
   return !!(tenant || user);
-}
-
-function ownerToken(user) {
-  return signToken({
-    type: 'tenant_user',
-    id: user._id.toString(),
-    tenantId: user.tenantId.toString(),
-    username: user.username,
-    displayName: user.displayName,
-    role: user.role,
-    pv: passwordVersion(user.password),
-  });
 }
 
 function requireOwner(req, res) {
@@ -55,7 +58,8 @@ class TenantAuthController {
   }
 
   async register(req, res) {
-    const { name, username, password } = req.body;
+    const { name, password } = req.body;
+    const username = normalizeUsername(req.body.username);
     const email = normalizeEmail(req.body.email);
     const settings = authSettings(await getSystemSettings());
     if (!settings.tenantRegisterEnabled) return error(res, REGISTER_DISABLED_MESSAGE, 4034, 403);
@@ -63,7 +67,11 @@ class TenantAuthController {
       const valid = await verifyEmailCode({ scope: 'tenant-register', email, code: req.body.emailCode });
       if (!valid) return error(res, '邮箱验证码错误或已过期', 4004, 400);
     }
-    if (await Tenant.exists({ username })) return error(res, '用户名已被注册');
+    const [tenantUsernameInUse, userUsernameInUse] = await Promise.all([
+      Tenant.exists({ username }),
+      TenantUser.exists({ username }),
+    ]);
+    if (tenantUsernameInUse || userUsernameInUse) return error(res, '用户名已被注册', 409, 409);
     if (await emailInUse(email)) return error(res, '邮箱已被注册');
 
     const passwordHash = hashPassword(password);
@@ -74,14 +82,15 @@ class TenantAuthController {
       return ok(res, { tenant: tenant.toJSON(), owner: owner.toJSON() });
     } catch (err) {
       if (tenant?._id) await Tenant.deleteOne({ _id: tenant._id });
-      if (err?.code === 11000) return error(res, '用户名或邮箱已被注册');
+      if (err?.code === 11000) return error(res, '用户名或邮箱已被注册', 409, 409);
       throw err;
     }
   }
 
   async login(req, res) {
-    const { username, password } = req.body;
-    const tenantIdentifier = String(req.body.tenant || '').trim();
+    const username = normalizeUsername(req.body.username);
+    const { password } = req.body;
+    const tenantIdentifier = normalizeUsername(req.body.tenant);
     const settings = authSettings(await getSystemSettings());
     if (!settings.tenantLoginEnabled) return error(res, '客服登录暂时关闭，有问题请联系管理员', 4034, 403);
 
@@ -106,21 +115,25 @@ class TenantAuthController {
       ownerTenant.lastLoginAt = new Date();
       await ownerTenant.save();
       let owner = await TenantUser.findOne({ tenantId: ownerTenant._id, role: 'owner' });
-      if (!owner) owner = await TenantUser.create({ tenantId: ownerTenant._id, username: ownerTenant.username, password: ownerTenant.password, displayName: ownerTenant.name, role: 'owner', status: 'active' });
+      if (!owner) {
+        try {
+          owner = await TenantUser.create({ tenantId: ownerTenant._id, username: normalizeUsername(ownerTenant.username), password: ownerTenant.password, displayName: ownerTenant.name, role: 'owner', status: 'active' });
+        } catch (err) {
+          if (err?.code === 11000) return error(res, '用户名已被使用', 409, 409);
+          throw err;
+        }
+      }
       if (owner.status !== 'active') return error(res, '账号已被禁用', 403, 403);
       owner.lastLoginAt = new Date();
       await owner.save();
+      const { token } = await createSessionAndToken({ user: owner, req, loginMethod: 'password' });
       recordLogin({ req, tenantId: ownerTenant._id, user: owner, result: 'success', detail: '登录成功' });
-      return ok(res, { token: ownerToken(owner), tenant: ownerTenant.toJSON(), user: owner.toJSON() });
+      return ok(res, { token, tenant: ownerTenant.toJSON(), user: owner.toJSON() });
     }
 
     const userQuery = isEmailLogin ? { email: loginEmail } : { username };
     if (specifiedTenant) userQuery.tenantId = specifiedTenant._id;
-    const users = await TenantUser.find(userQuery).limit(2);
-    if (!specifiedTenant && !isEmailLogin && users.length > 1) {
-      return error(res, '该用户名属于多个租户，请提供租户账号或标识', 4092, 409);
-    }
-    const user = users[0];
+    const user = await TenantUser.findOne(userQuery);
     if (!user || !comparePassword(password, user.password)) {
       recordLogin({ req, tenantId: user ? user.tenantId : (ownerTenant ? ownerTenant._id : null), user: user || { username }, result: 'failure', detail: '账号或密码错误' });
       return error(res, '账号或密码错误', 401, 401);
@@ -136,8 +149,41 @@ class TenantAuthController {
     }
     user.lastLoginAt = new Date();
     await user.save();
+    const { token } = await createSessionAndToken({ user, req, loginMethod: 'password' });
     recordLogin({ req, tenantId: user.tenantId, user, result: 'success', detail: '登录成功' });
-    return ok(res, { token: ownerToken(user), tenant: tenantObj.toJSON(), user: user.toJSON() });
+    return ok(res, { token, tenant: tenantObj.toJSON(), user: user.toJSON() });
+  }
+
+  async keyLogin(req, res) {
+    const settings = authSettings(await getSystemSettings());
+    if (!settings.tenantLoginEnabled) return error(res, '客服登录暂时关闭，有问题请联系管理员', 4034, 403);
+    const rawKey = String(req.body?.key || req.body?.loginKey || '').trim();
+    const keyError = (reason = 'LOGIN_KEY_INVALID') => {
+      const expired = reason === 'LOGIN_KEY_EXPIRED';
+      const used = reason === 'LOGIN_KEY_USED';
+      return res.status(401).json({
+        code: expired ? 401011 : used ? 401012 : 401010,
+        message: expired ? '登录密钥已过期' : used ? '登录密钥已使用' : '登录密钥错误',
+        reason,
+        data: null,
+        requestId: res.locals.requestId,
+      });
+    };
+    const consumed = await consumeTemporaryLoginKey(rawKey);
+    if (!consumed.loginKey) return keyError(consumed.reason);
+    const loginKey = consumed.loginKey;
+    const [user, tenant] = await Promise.all([
+      TenantUser.findOne({ _id: loginKey.userId, tenantId: loginKey.tenantId }),
+      Tenant.findById(loginKey.tenantId),
+    ]);
+    if (!user || user.status !== 'active' || !tenant || !['active', 'trial'].includes(tenant.status)) {
+      return keyError('LOGIN_KEY_UNAVAILABLE');
+    }
+    user.lastLoginAt = new Date();
+    await user.save();
+    const { token } = await createSessionAndToken({ user, req, loginMethod: 'key' });
+    recordLogin({ req, tenantId: user.tenantId, user, result: 'success', detail: '临时登录密钥登录成功' });
+    return ok(res, { token, tenant: tenant.toJSON(), user: user.toJSON() });
   }
 
   async me(req, res) {
@@ -147,7 +193,122 @@ class TenantAuthController {
     return ok(res, { user: user.toJSON(), tenant: tenant ? tenant.toJSON() : null });
   }
 
+  async listSessions(req, res) {
+    const sessions = await TenantUserSession.find({
+      tenantId: req.tenantId,
+      userId: req.user.id,
+      revokedAt: null,
+      expiresAt: { $gt: new Date() },
+    }).sort({ lastSeenAt: -1 }).lean();
+    return ok(res, sessions.map(session => ({
+      ...session,
+      id: String(session._id),
+      current: String(session._id) === String(req.user.sid),
+      isCurrent: String(session._id) === String(req.user.sid),
+      clientType: session.deviceType,
+      loginType: session.loginMethod,
+      method: session.loginMethod,
+      loginAt: session.createdAt,
+      lastActiveAt: session.lastSeenAt,
+    })));
+  }
+
+  async revokeSession(req, res) {
+    const currentSession = await TenantUserSession.findOne({
+      _id: req.user.sid,
+      tenantId: req.tenantId,
+      userId: req.user.id,
+      loginMethod: 'password',
+      revokedAt: null,
+      expiresAt: { $gt: new Date() },
+    });
+    if (!currentSession) return error(res, '仅账号密码登录可管理登录设备', 403, 403);
+
+    const session = mongoose.isValidObjectId(req.params.id) && await TenantUserSession.findOne({
+      _id: req.params.id,
+      tenantId: req.tenantId,
+      userId: req.user.id,
+      revokedAt: null,
+      expiresAt: { $gt: new Date() },
+    });
+    if (!session) return error(res, '登录设备不存在或已退出', 404, 404);
+    await revokeSession({
+      sessionId: session._id,
+      tenantId: req.tenantId,
+      userId: req.user.id,
+      revokedBy: req.user.id,
+      reason: '通过设备管理撤销',
+      io: req.app.get('io'),
+    });
+    return ok(res, null, '设备已登出');
+  }
+
+  async getLoginKey(req, res) {
+    const loginKey = await TenantUserLoginKey.findOne({
+      userId: req.user.id,
+      tenantId: req.tenantId,
+      revokedAt: null,
+      consumedAt: null,
+      expiresAt: { $gt: new Date() },
+    }).lean();
+    if (!loginKey) return ok(res, null);
+    return ok(res, {
+      id: String(loginKey._id),
+      keyId: loginKey.keyId,
+      prefix: `kf_${loginKey.keyId}_`,
+      suffix: '',
+      summary: `kf_${loginKey.keyId}_••••••••`,
+      maskedKey: `kf_${loginKey.keyId}_••••••••`,
+      source: loginKey.source,
+      createdAt: loginKey.createdAt,
+      expiresAt: loginKey.expiresAt,
+    });
+  }
+
+  async generateLoginKey(req, res) {
+    const { key, loginKey, expiresAt, expiresIn } = await generateTemporaryLoginKey({
+      tenantId: req.tenantId,
+      userId: req.user.id,
+      source: 'tenant',
+    });
+    recordOperation({ req, tenantId: req.tenantId, user: req.user, action: 'generate_login_key', detail: '生成 120 秒临时登录密钥' });
+    return ok(res, {
+      key,
+      loginKey: key,
+      expiresAt,
+      expiresIn,
+      loginKeyInfo: {
+        id: String(loginKey._id),
+        keyId: loginKey.keyId,
+        prefix: `kf_${loginKey.keyId}_`,
+        summary: `kf_${loginKey.keyId}_••••••••`,
+        maskedKey: `kf_${loginKey.keyId}_••••••••`,
+        source: loginKey.source,
+        createdAt: loginKey.createdAt,
+        expiresAt,
+        expiresIn,
+      },
+    }, '临时登录密钥已生成');
+  }
+
+  async revokeLoginKey(req, res) {
+    const result = await TenantUserLoginKey.updateOne(
+      { userId: req.user.id, tenantId: req.tenantId, revokedAt: null },
+      { $set: { revokedAt: new Date() } },
+    );
+    if (result.modifiedCount) recordOperation({ req, tenantId: req.tenantId, user: req.user, action: 'revoke_login_key', detail: '撤销登录密钥' });
+    return ok(res, null, '登录密钥已撤销');
+  }
+
   async logout(req, res) {
+    await revokeSession({
+      sessionId: req.user.sid,
+      tenantId: req.tenantId,
+      userId: req.user.id,
+      revokedBy: req.user.id,
+      reason: '当前设备退出登录',
+      io: req.app.get('io'),
+    });
     return ok(res, null, '已退出');
   }
 
@@ -170,8 +331,10 @@ class TenantAuthController {
     }
     await user.save();
     const tenant = await Tenant.findById(req.tenantId);
+    const token = await signForSession(user, req.user.sid);
+    if (!token) return error(res, '登录会话已失效，请重新登录', 4012, 401);
     recordOperation({ req, tenantId: req.tenantId, user, action: 'update_profile', detail: '修改个人资料' });
-    return ok(res, { token: ownerToken(user), user: user.toJSON(), tenant: tenant.toJSON() }, '资料已更新');
+    return ok(res, { token, user: user.toJSON(), tenant: tenant.toJSON() }, '资料已更新');
   }
 
   async sendProfileEmailCode(req, res) {

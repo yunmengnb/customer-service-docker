@@ -1,11 +1,10 @@
 <!-- 忆梦云团队开发 - Jingpro SSO 回调 -->
 <script setup>
 import { onMounted, ref } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
+import { useRouter } from 'vue-router'
 import api from '../api'
 
 const router = useRouter()
-const route = useRoute()
 const status = ref('loading')
 const message = ref('正在登录，请稍候...')
 const errorDetail = ref('')
@@ -28,14 +27,20 @@ function adminSsoUrl(data) {
 }
 
 onMounted(async () => {
-  const token = typeof route.query.token === 'string' ? route.query.token.trim() : ''
-  if (!token) {
+  const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ''))
+  const code = String(fragment.get('code') || '').trim()
+  if (window.location.hash) {
+    const cleanUrl = new URL(window.location.href)
+    cleanUrl.hash = ''
+    window.history.replaceState(window.history.state, '', cleanUrl.pathname)
+  }
+  if (!/^[A-Za-z0-9_-]{43}$/.test(code)) {
     status.value = 'error'
-    message.value = '缺少登录令牌参数'
+    message.value = '缺少或无效的一次性登录码'
     return
   }
   try {
-    const res = await api.post('/integration/sso-login', { token })
+    const res = await api.post('/integration/sso-login', { code })
     if (res.code === 200 && res.data?.token) {
       const data = res.data
       if (data.userType === 'admin') {
@@ -52,7 +57,8 @@ onMounted(async () => {
       localStorage.setItem('tenant_info', JSON.stringify(data.tenant))
       status.value = 'success'
       message.value = '登录成功，正在跳转...'
-      setTimeout(() => router.replace(data.redirect || '/messages'), 500)
+      window.alert('登录成功')
+      router.replace(data.redirect || '/messages')
     } else if (res.code === 40102) {
       status.value = 'error'
       message.value = '该登录链接已使用过，请返回 Jingpro 后台重新生成'

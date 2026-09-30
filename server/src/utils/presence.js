@@ -68,4 +68,19 @@ async function isOnline(type, id) {
   return (localCounts.get(key) || 0) > 0;
 }
 
-module.exports = { connect, touch, disconnect, isOnline };
+async function clearAll() {
+  localCounts.clear();
+  const redis = getRedis();
+  if (!redis) return 0;
+  let cursor = '0';
+  let deleted = 0;
+  do {
+    const reply = await redis.sendCommand(['SCAN', cursor, 'MATCH', 'presence:*', 'COUNT', '200']);
+    cursor = String(reply[0]);
+    const keys = reply[1] || [];
+    if (keys.length) deleted += Number(await redis.sendCommand(['DEL', ...keys]));
+  } while (cursor !== '0');
+  return deleted;
+}
+
+module.exports = { connect, touch, disconnect, isOnline, clearAll };

@@ -5,6 +5,7 @@ const Conversation = require('../models/Conversation');
 const Message = require('../models/Message');
 const { removeFile } = require('./conversationAttachmentService');
 const { getSystemSettings } = require('../utils/systemSettings');
+const maintenance = require('./maintenanceService');
 
 let running = false;
 let timer = null;
@@ -41,7 +42,12 @@ async function runCleanup(options = {}) {
   const startedAt = new Date();
   const taskId = crypto.randomUUID();
   const result = { taskId, startedAt, scanned: 0, deleted: 0, failed: 0, releasedBytes: 0, errors: [] };
+  let finish = null;
   try {
+    if (await maintenance.isFrozen()) return { ...result, skipped: true, reason: 'MIGRATION_WRITE_FROZEN' };
+    await maintenance.markBusinessWriteAccepted();
+    finish = maintenance.beginWrite();
+    if (await maintenance.isFrozen()) return { ...result, skipped: true, reason: 'MIGRATION_WRITE_FROZEN' };
     const settings = await getSystemSettings();
     const limit = Math.min(Math.max(Number(options.limit) || settings.storage.cleanupBatchSize, 1), 100);
     for (let index = 0; index < limit; index += 1) {
@@ -110,6 +116,7 @@ async function runCleanup(options = {}) {
       }
     }
   } finally {
+    finish?.();
     running = false;
     result.finishedAt = new Date();
     lastRun = result;

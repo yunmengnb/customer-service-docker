@@ -53,12 +53,22 @@ function goLogs() {
   router.push('/m/logs')
 }
 
+function goLoginDevices() {
+  router.push('/m/login-devices')
+}
+
+function goLoginKey() {
+  router.push('/m/login-key')
+}
+
 async function doLogout() {
   showLogoutConfirm.value = false
   const identityScope = tenantIdentityScope()
-  await clearIdentityCache(identityScope)
-  clearTenantSession()
-  router.push('/login')
+  try { await api.post('/tenant/auth/logout') } catch (_) {}
+  try { await clearIdentityCache(identityScope) } finally {
+    clearTenantSession()
+    router.replace('/login')
+  }
 }
 </script>
 
@@ -81,6 +91,7 @@ async function doLogout() {
 
     <!-- 功能列表 -->
     <div class="me-menu">
+      <button class="me-menu-item" @click="router.push('/wechat-binding')"><span class="me-menu-icon">W</span><span class="me-menu-label">微信绑定</span><span class="me-menu-arrow">›</span></button>
       <button class="me-menu-item" @click="goProfileEdit">
         <span class="me-menu-icon">👤</span>
         <span class="me-menu-label">资料管理</span>
@@ -104,6 +115,16 @@ async function doLogout() {
       <button class="me-menu-item" @click="goLogs">
         <span class="me-menu-icon">🕓</span>
         <span class="me-menu-label">操作日志</span>
+        <span class="me-menu-arrow">›</span>
+      </button>
+      <button class="me-menu-item" @click="goLoginDevices">
+        <span class="me-menu-icon">▣</span>
+        <span class="me-menu-label">登录设备</span>
+        <span class="me-menu-arrow">›</span>
+      </button>
+      <button class="me-menu-item" @click="goLoginKey">
+        <span class="me-menu-icon">⌘</span>
+        <span class="me-menu-label">登录密钥</span>
         <span class="me-menu-arrow">›</span>
       </button>
       <button class="me-menu-item" @click="goAbout">

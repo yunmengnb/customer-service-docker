@@ -37,6 +37,7 @@ const navItems = computed(() => {
   if (isSuper.value) {
     items.splice(7, 0,
       { path: '/extensions', icon: '◇', label: '扩展应用' },
+      { path: '/data-migration', icon: '⇄', label: '数据迁移' },
       { path: '/settings', icon: '⚙', label: '系统设置' },
     )
   }
@@ -120,6 +121,7 @@ function initials(name) {
           <span v-else-if="route.path.startsWith('/announcements')">公告管理</span>
           <span v-else-if="route.path.startsWith('/apps')">APP 管理</span>
           <span v-else-if="route.path.startsWith('/extensions')">扩展应用</span>
+          <span v-else-if="route.path.startsWith('/data-migration')">数据迁移</span>
           <span v-else-if="route.path.startsWith('/settings')">系统设置</span>
           <span v-else-if="route.path.startsWith('/version')">版本信息</span>
           <span v-else-if="route.path.startsWith('/profile')">个人资料</span>

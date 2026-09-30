@@ -17,6 +17,9 @@ api.interceptors.request.use(config => {
   if (token && (!isPublicAuthRequest(config.url) || isGuestBindingRequest)) {
     config.headers.Authorization = `Bearer ${token}`
   }
+  if (/^\/wechat\/client\//.test(config.url || '') && String(config.method || 'get').toLowerCase() === 'post') {
+    config.headers['X-Wechat-Intent'] = 'client-v1'
+  }
   return config
 })
 
@@ -25,7 +28,7 @@ api.interceptors.response.use(
   res => res.data,
   err => {
     if (err.response?.status === 401 && err.config?.headers?.Authorization) {
-      localStorage.removeItem('client_token')
+      clearClientSession()
     }
     const reason = err.response?.data || err
     if (reason && typeof reason === 'object') reason.httpStatus = err.response?.status
@@ -50,5 +53,16 @@ function getSocket(token) {
   return socket
 }
 
-export { api, getSocket }
+function disconnectClientSocket() {
+  socket?.disconnect()
+  socket = null
+  socketToken = null
+}
+
+function clearClientSession() {
+  localStorage.removeItem('client_token')
+  disconnectClientSocket()
+}
+
+export { api, getSocket, disconnectClientSocket, clearClientSession }
 export default api

@@ -5,7 +5,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 const MOBILE_BREAKPOINT = 768
 const desktopPrefix = '/desktop'
 const mobilePrefix = '/m'
-const publicPaths = new Set(['/login', '/register', '/forgot-password', '/sso'])
+const publicPaths = new Set(['/login', '/register', '/forgot-password', '/sso', '/wechat-notification'])
 
 const devicePrefix = () => window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT}px)`).matches ? mobilePrefix : desktopPrefix
 
@@ -26,6 +26,10 @@ function mapPathToDevice(path, prefix = devicePrefix()) {
 }
 
 const routes = [
+  { path: '/wechat-login', component: () => import('./views/WechatStaff.vue'), meta: { public: true } },
+  { path: '/wechat-confirm', component: () => import('./views/WechatStaff.vue'), meta: { public: true } },
+  { path: '/wechat-binding', component: () => import('./views/WechatStaff.vue') },
+  { path: '/wechat-notification', component: () => import('./views/WechatNotificationPage.vue'), meta: { public: true } },
   { path: '/login', component: () => import('./views/Login.vue'), meta: { public: true } },
   { path: '/register', component: () => import('./views/Register.vue'), meta: { public: true } },
   { path: '/forgot-password', component: () => import('./views/ForgotPassword.vue'), meta: { public: true } },
@@ -70,8 +74,11 @@ const routes = [
       { path: 'employees', component: () => import('./views/desktop/Agents.vue'), meta: { adminOnly: true } },
       { path: 'extensions', component: () => import('./views/desktop/Extensions.vue'), meta: { adminOnly: true } },
       { path: 'extensions/jingpro', component: () => import('./views/desktop/JingproExtension.vue'), meta: { adminOnly: true } },
+      { path: 'extensions/wechat-official', component: () => import('./views/WechatOfficialExtension.vue'), meta: { adminOnly: true } },
       { path: 'account', component: () => import('./views/Account.vue'), meta: { ownerOnly: true } },
       { path: 'profile', component: () => import('./views/desktop/Profile.vue') },
+      { path: 'login-devices', component: () => import('./views/LoginDevices.vue') },
+      { path: 'login-key', component: () => import('./views/LoginKey.vue') },
       { path: 'logs', component: () => import('./views/desktop/Logs.vue') },
     ],
   },
@@ -91,9 +98,12 @@ const routes = [
       { path: 'profile', component: () => import('./views/mobile/Profile.vue') },
       { path: 'profile/account', component: () => import('./views/Account.vue'), meta: { ownerOnly: true } },
       { path: 'profile/about', component: () => import('./views/mobile/About.vue') },
+      { path: 'login-devices', component: () => import('./views/LoginDevices.vue') },
+      { path: 'login-key', component: () => import('./views/LoginKey.vue') },
       { path: 'employees', component: () => import('./views/mobile/Agents.vue'), meta: { adminOnly: true } },
       { path: 'extensions', component: () => import('./views/mobile/Extensions.vue'), meta: { adminOnly: true } },
       { path: 'extensions/jingpro', component: () => import('./views/mobile/JingproExtension.vue'), meta: { adminOnly: true } },
+      { path: 'extensions/wechat-official', component: () => import('./views/WechatOfficialExtension.vue'), meta: { adminOnly: true } },
       { path: 'logs', component: () => import('./views/mobile/Logs.vue') },
     ],
   },

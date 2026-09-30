@@ -11,8 +11,8 @@ const { getSystemSettings } = require('../utils/systemSettings');
 const ConversationAttachmentController = require('../controllers/ConversationAttachmentController');
 
 const router = express.Router();
-const UPLOAD_DIR = path.resolve(__dirname, '..', '..', 'uploads');
-const APP_PUBLIC_ORIGIN = 'https://user.by0.me';
+const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || path.resolve(__dirname, '..', '..', 'uploads'));
+const APP_PUBLIC_ORIGIN = process.env.APP_PUBLIC_ORIGIN || 'https://user.czez.top';
 const MIME_BY_EXTENSION = {
   jpg: ['image/jpeg'], jpeg: ['image/jpeg'], png: ['image/png'], gif: ['image/gif'], webp: ['image/webp'],
   pdf: ['application/pdf'], docx: ['application/vnd.openxmlformats-officedocument.wordprocessingml.document'],

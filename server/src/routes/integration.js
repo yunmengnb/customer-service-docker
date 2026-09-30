@@ -3,6 +3,7 @@ const express = require('express');
 const multer = require('multer');
 const router = express.Router();
 const { authAdmin, requireSuperAdmin } = require('../middleware/auth');
+const { originGuard, requirePassword } = require('../middleware/migrationAdmin');
 
 const integrationImageUpload = multer({
   storage: multer.memoryStorage(),
@@ -11,17 +12,19 @@ const integrationImageUpload = multer({
     ? cb(null, true)
     : cb(new Error('仅支持 JPG、PNG、GIF、WEBP 图片')),
 });
-const { integrationAuth } = require('../middleware/integrationAuth');
+const { integrationAuth, integrationPingAuth, verifyMultipartFile } = require('../middleware/integrationAuth');
 const IntegrationController = require('../controllers/IntegrationController');
 
 // ===== Jingpro 联动对外 API（带签名校验）=====
-router.get('/ping', integrationAuth, IntegrationController.ping);
+router.get('/ping', integrationPingAuth, IntegrationController.ping);
 router.post('/ensure-tenant-and-channel', integrationAuth, IntegrationController.ensureTenantAndChannel);
+router.post('/login-key', integrationAuth, IntegrationController.generateLoginKey);
+router.post('/sso-code', integrationAuth, IntegrationController.createSsoCode);
 router.patch('/channels/:id', integrationAuth, IntegrationController.patchChannel);
 router.post('/channels/:channelId/images', integrationAuth, (req, res) => {
   integrationImageUpload.single('file')(req, res, err => {
     if (err) return res.status(400).json({ code: 400001, msg: err.code === 'LIMIT_FILE_SIZE' ? '图片大小不能超过 5MB' : err.message, data: null });
-    return IntegrationController.uploadImage(req, res);
+    return verifyMultipartFile(req, res, () => IntegrationController.uploadImage(req, res));
   });
 });
 router.get('/channels/:channelId/keywords', integrationAuth, IntegrationController.listKeywordReplies);
@@ -38,6 +41,9 @@ router.post('/employee-token-login', IntegrationController.employeeTokenLogin);
 router.post('/sso-login', IntegrationController.ssoLogin);
 
 // ===== 平台管理员设置（需要超级管理员）=====
+router.get('/admin/extensions', authAdmin, requireSuperAdmin, IntegrationController.listAdminExtensions);
+router.get('/admin/extensions/:provider', authAdmin, requireSuperAdmin, IntegrationController.getAdminExtension);
+router.patch('/admin/extensions/:provider/status', authAdmin, requireSuperAdmin, originGuard, requirePassword, IntegrationController.setAdminExtensionStatus);
 router.get('/admin/setting', authAdmin, requireSuperAdmin, IntegrationController.getAdminSetting);
 router.post('/admin/setting', authAdmin, requireSuperAdmin, IntegrationController.setAdminSetting);
 

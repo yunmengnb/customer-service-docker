@@ -6,6 +6,9 @@ const TenantUser = require('../models/TenantUser');
 const Customer = require('../models/Customer');
 const CustomerAccount = require('../models/CustomerAccount');
 const Channel = require('../models/Channel');
+const { validateSession } = require('../services/tenantSessionService');
+const { validateSession: validateCustomerSession } = require('../services/customerSessionService');
+const migrationControl = require('../services/migrationControl');
 
 /**
  * 平台管理员认证中间件
@@ -35,6 +38,10 @@ async function authAdmin(req, res, next, verifiedIdentity = null) {
     }
     if (payload.pv && passwordVersion(admin.password) !== payload.pv) {
       return error(res, '令牌已失效，请重新登录', 4012, 401);
+    }
+    const pointer = await migrationControl.readPointer();
+    if (!Number.isSafeInteger(payload.dg) || payload.dg !== pointer.generation) {
+      return error(res, '数据库代际已切换，请重新登录', 4012, 401);
     }
     // 用数据库最新数据覆盖 payload，防止 role 变更后 token 内信息过期
     req.admin = { ...payload, role: admin.role, status: admin.status };
@@ -70,15 +77,17 @@ async function authTenantUser(req, res, next, verifiedIdentity = null) {
   }
   
   const payload = verifiedIdentity || verifyToken(token);
-  if (!payload || payload.type !== 'tenant_user') {
+  if (!payload || payload.type !== 'tenant_user' || !payload.sid) {
     return error(res, '令牌无效或已过期', 4012, 401);
   }
 
   try {
+    const session = await validateSession(payload);
+    if (!session) return error(res, '登录会话已失效，请重新登录', 4012, 401);
     const user = await TenantUser.findOne({ _id: payload.id, tenantId: payload.tenantId });
     if (!user) return error(res, '账号不存在', 4012, 401);
     if (user.status !== 'active') return error(res, '账号已被禁用', 4032, 403);
-    if (payload.pv && passwordVersion(user.password) !== payload.pv) {
+    if (!payload.pv || passwordVersion(user.password) !== payload.pv) {
       return error(res, '令牌已失效，请重新登录', 4012, 401);
     }
 
@@ -97,6 +106,7 @@ async function authTenantUser(req, res, next, verifiedIdentity = null) {
     req.tenantId = user.tenantId.toString();
     next();
   } catch (e) {
+    if (e?.name === 'CastError') return error(res, '令牌无效或已过期', 4012, 401);
     return error(res, '服务异常', 5001, 500);
   }
 }
@@ -132,9 +142,11 @@ async function authCustomer(req, res, next, verifiedIdentity = null) {
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (!token && !verifiedIdentity) return error(res, '未登录', 4011, 401);
   const payload = verifiedIdentity || verifyToken(token);
-  if (!payload || payload.type !== 'customer') return error(res, '令牌无效或已过期', 4012, 401);
+  if (!payload || payload.type !== 'customer' || !payload.sid) return error(res, '令牌无效或已过期', 4012, 401);
 
   try {
+    const loginSession = await validateCustomerSession(payload);
+    if (!loginSession) return error(res, '登录会话已失效，请重新登录', 4012, 401);
     // 纯账号令牌仍可访问账号中心；带聊天上下文的令牌必须对应有效渠道和租户。
     if (payload.id || payload.channelId || payload.tenantId) {
       if (!payload.id || !payload.channelId || !payload.tenantId) return error(res, '客户上下文无效', 4012, 401);
@@ -143,6 +155,15 @@ async function authCustomer(req, res, next, verifiedIdentity = null) {
         Tenant.findOne({ _id: payload.tenantId, status: { $in: ['active', 'trial'] } }).select('_id'),
       ]);
       if (!channel || !tenant) return error(res, '渠道不存在或已不可用', 4035, 403);
+      if (payload.conversationId) {
+        const conversation = await require('../models/Conversation').findOne({
+          _id: payload.conversationId,
+          tenantId: payload.tenantId,
+          channelId: payload.channelId,
+          customerId: payload.id,
+        }).select('_id');
+        if (!conversation) return error(res, '会话范围已失效', 4035, 403);
+      }
     }
     if (payload.identity === 'guest') {
       const binding = await Customer.findOne({

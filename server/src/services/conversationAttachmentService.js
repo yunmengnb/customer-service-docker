@@ -9,7 +9,7 @@ const Message = require('../models/Message');
 const Channel = require('../models/Channel');
 const { getSystemSettings } = require('../utils/systemSettings');
 
-const UPLOAD_ROOT = path.resolve(__dirname, '..', '..', 'uploads');
+const UPLOAD_ROOT = path.resolve(process.env.UPLOAD_DIR || path.resolve(__dirname, '..', '..', 'uploads'));
 const CONVERSATION_ROOT = path.join(UPLOAD_ROOT, 'conversations');
 const CATEGORY_BY_TYPE = { image: 'image', video: 'video', file: 'file' };
 
@@ -106,13 +106,18 @@ async function validatePendingAttachment({ attachmentId, tenantId, channelId, co
   return attachment;
 }
 
-async function createMessageWithAttachment(messageData, attachment) {
-  if (!attachment) return Message.create(messageData);
+async function createMessageWithAttachment(messageData, attachment, { session = null } = {}) {
+  const createMessage = async data => {
+    if (!session) return Message.create(data);
+    const [message] = await Message.create([data], { session });
+    return message;
+  };
+  if (!attachment) return createMessage(messageData);
   const settings = await getSystemSettings();
   const retentionDays = settings.storage.conversationAttachmentRetentionDays;
   const activatedAt = new Date(messageData.createdAt || Date.now());
   const attachmentExpiredAt = new Date(activatedAt.getTime() + retentionDays * 86400000);
-  const message = await Message.create({
+  const message = await createMessage({
     ...messageData,
     attachmentId: attachment._id,
     attachmentStatus: 'none',
@@ -142,31 +147,33 @@ async function createMessageWithAttachment(messageData, attachment) {
         deleteReason: 'expired',
       },
     },
-    { new: true },
+    { new: true, session },
   );
   if (!activated) {
-    await Message.deleteOne({ _id: message._id, attachmentStatus: 'none' });
+    await Message.deleteOne({ _id: message._id, attachmentStatus: 'none' }, { session });
     throw new Error('附件已过期或被其他消息使用');
   }
   try {
     message.attachmentStatus = 'active';
     message.attachmentExpiredAt = attachmentExpiredAt;
-    await message.save();
+    await message.save({ session });
     return message;
   } catch (err) {
-    await ConversationAttachment.updateOne(
-      { _id: attachment._id, status: 'active', messageId: message._id },
-      {
-        $set: {
-          status: 'deleting',
-          deleteAfter: new Date(),
-          deleteReason: 'orphaned',
-          cleanupLeaseUntil: null,
-          cleanupLeaseId: '',
+    if (!session) {
+      await ConversationAttachment.updateOne(
+        { _id: attachment._id, status: 'active', messageId: message._id },
+        {
+          $set: {
+            status: 'deleting',
+            deleteAfter: new Date(),
+            deleteReason: 'orphaned',
+            cleanupLeaseUntil: null,
+            cleanupLeaseId: '',
+          },
         },
-      },
-    );
-    await Message.deleteOne({ _id: message._id, attachmentStatus: { $ne: 'active' } });
+      );
+      await Message.deleteOne({ _id: message._id, attachmentStatus: { $ne: 'active' } });
+    }
     throw err;
   }
 }

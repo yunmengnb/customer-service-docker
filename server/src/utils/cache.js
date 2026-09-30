@@ -90,4 +90,27 @@ async function remove(...keys) {
   }
 }
 
-module.exports = { getJson, setJson, consumeJson, consumeMatchingJson, remove };
+async function clearNamespaces(prefixes) {
+  const safePrefixes = [...new Set(prefixes.map(value => String(value || '')).filter(value => /^[a-z][a-z0-9_-]*:$/i.test(value)))];
+  if (!safePrefixes.length) throw new Error('CACHE_NAMESPACE_REQUIRED');
+  for (const key of memoryCache.keys()) {
+    if (safePrefixes.some(prefix => key.startsWith(prefix))) memoryCache.delete(key);
+  }
+  const redis = getRedis();
+  if (!redis) return 0;
+  let deleted = 0;
+  for (const prefix of safePrefixes) {
+    let cursor = '0';
+    do {
+      const reply = await redis.sendCommand(['SCAN', cursor, 'MATCH', `${prefix}*`, 'COUNT', '200']);
+      cursor = String(reply[0]);
+      const keys = reply[1] || [];
+      if (keys.length) {
+        deleted += Number(await redis.sendCommand(['DEL', ...keys]));
+      }
+    } while (cursor !== '0');
+  }
+  return deleted;
+}
+
+module.exports = { getJson, setJson, consumeJson, consumeMatchingJson, remove, clearNamespaces };

@@ -22,7 +22,20 @@ const {
   jwtDecodeHeader,
   jwtVerifyHS256,
 } = require('../middleware/integrationAuth');
-const { hashPassword, signToken, generateToken, passwordVersion } = require('../utils');
+const { hashPassword, generateToken } = require('../utils');
+const { createSessionAndToken } = require('../services/tenantSessionService');
+const { generateTemporaryLoginKey } = require('../services/tenantLoginKeyService');
+const WechatOfficialAccount = require('../models/WechatOfficialAccount');
+const TenantUserSession = require('../models/TenantUserSession');
+const WechatAuthChallenge = require('../models/WechatAuthChallenge');
+const customerSessionService = require('../services/customerSessionService');
+const { recordOperation } = require('../services/auditLogService');
+const {
+  getPlatformExtension,
+  listPlatformExtensions,
+  setPlatformControl,
+  tenantAllowed,
+} = require('../services/extensionPlatformService');
 
 function genHex(len) {
   return crypto.randomBytes(Math.ceil(len / 2)).toString('hex').slice(0, len);
@@ -55,7 +68,6 @@ function connectionResponse(connection, platformSetting) {
     tenantId: String(data.tenantId),
     keyId: data.keyId,
     hasSecret: !!connection.platformSecret,
-    maskedSecret: maskSecret(connection.platformSecret),
     serverBaseUrl: platformSetting.serverBaseUrl,
     widgetBaseUrl: platformSetting.widgetBaseUrl,
   };
@@ -133,6 +145,50 @@ function buildCustomerServiceLink(baseUrl, publicToken) {
   return base ? `${base}/c/${publicToken}` : `/c/${publicToken}`;
 }
 
+async function extensionUsage(platforms) {
+  const [jingproConfigured, jingproEnabled, wechatConfigured, wechatEnabled] = await Promise.all([
+    TenantIntegration.countDocuments({ provider: 'jingpro' }),
+    TenantIntegration.countDocuments({ provider: 'jingpro', enabled: true }),
+    WechatOfficialAccount.countDocuments({ isCurrent: true }),
+    WechatOfficialAccount.countDocuments({ isCurrent: true, enabled: true }),
+  ]);
+  const usage = {
+    jingpro: { configuredTenants: jingproConfigured, enabledTenants: jingproEnabled },
+    wechat_official: { configuredTenants: wechatConfigured, enabledTenants: wechatEnabled },
+  };
+  return platforms.map(item => ({ ...item, usage: usage[item.provider] || { configuredTenants: 0, enabledTenants: 0 } }));
+}
+
+async function revokeWechatPlatformSessions(req, reason, tenantFilter = {}) {
+  const now = new Date();
+  const tenantSessions = await TenantUserSession.find({
+    ...tenantFilter,
+    loginMethod: 'wechat',
+    revokedAt: null,
+  }).select('_id wechatBindingId');
+  if (tenantSessions.length) {
+    await TenantUserSession.updateMany(
+      { _id: { $in: tenantSessions.map(item => item._id) }, revokedAt: null },
+      { $set: { revokedAt: now, revokeReason: reason } },
+    );
+  }
+  const customerCount = await customerSessionService.revokeMany(
+    { ...tenantFilter, loginMethod: 'wechat' },
+    reason,
+    req.app.get('io'),
+  );
+  await WechatAuthChallenge.updateMany(
+    { ...tenantFilter, state: { $nin: ['consumed', 'cancelled'] } },
+    { $set: { state: 'cancelled' } },
+  );
+  const io = req.app.get('io');
+  for (const session of tenantSessions) {
+    io?.in(`tenant-session-${session._id}`).disconnectSockets(true);
+    if (session.wechatBindingId) io?.in(`wechat-binding-${session.wechatBindingId}`).disconnectSockets(true);
+  }
+  return { tenantSessions: tenantSessions.length, customerSessions: customerCount };
+}
+
 function isPublicHttpUrl(value) {
   try {
     const url = new URL(String(value || ''));
@@ -144,28 +200,73 @@ function isPublicHttpUrl(value) {
 
 const IntegrationController = {
   async listTenantExtensions(req, res) {
-    const setting = await getJingproPlatformSetting();
-    if (!setting.enabled) return res.json({ code: 200, msg: 'ok', data: [] });
-    const connection = await TenantIntegration.findOne({ tenantId: req.tenantId, provider: 'jingpro' }).select('+platformSecret').exec();
-    return res.json({ code: 200, msg: 'ok', data: [{ provider: 'jingpro', configured: !!connection, ...(connectionResponse(connection, setting) || {}) }] });
+    const [platforms, connection, wechat] = await Promise.all([
+      listPlatformExtensions(),
+      TenantIntegration.findOne({ tenantId: req.tenantId, provider: 'jingpro' }).select('+platformSecret').exec(),
+      WechatOfficialAccount.findOne({ tenantId: req.tenantId, isCurrent: true }).exec(),
+    ]);
+    const byProvider = Object.fromEntries(platforms.map(item => [item.provider, item]));
+    const jingpro = connectionResponse(connection, byProvider.jingpro);
+    const jingproAuthorized = tenantAllowed(byProvider.jingpro, req.tenantId);
+    const wechatAuthorized = tenantAllowed(byProvider.wechat_official, req.tenantId);
+    return res.json({ code: 200, msg: 'ok', data: [
+      {
+        ...byProvider.jingpro,
+        authorized: jingproAuthorized,
+        configured: !!connection,
+        configurationCompleteness: connection
+          ? (connection.platformName && connection.platformUrl && connection.platformSecret ? 100 : 67)
+          : 0,
+        tenantEnabled: connection?.enabled === true,
+        connectionEnabled: connection?.enabled === true,
+        ...(jingpro || {}),
+        platformEnabled: byProvider.jingpro.enabled,
+        enabled: jingproAuthorized && connection?.enabled === true,
+      },
+      {
+        ...byProvider.wechat_official,
+        authorized: wechatAuthorized,
+        configured: !!wechat,
+        configurationCompleteness: wechat
+          ? Math.round(([wechat.displayName, wechat.appId, wechat.credentialCheckedAt, wechat.callbackCheckedAt].filter(Boolean).length / 4) * 100)
+          : 0,
+        tenantEnabled: wechat?.enabled === true,
+        platformEnabled: byProvider.wechat_official.enabled,
+        enabled: wechatAuthorized && wechat?.enabled === true,
+      },
+    ] });
   },
 
   async getTenantJingpro(req, res) {
     const setting = await getJingproPlatformSetting();
-    if (!setting.enabled) return res.status(404).json({ code: 404001, msg: 'Jingpro extension is not available', data: null });
     const connection = await TenantIntegration.findOne({ tenantId: req.tenantId, provider: 'jingpro' }).select('+platformSecret').exec();
-    return res.json({ code: 200, msg: 'ok', data: connectionResponse(connection, setting) });
+    return res.json({ code: 200, msg: 'ok', data: {
+      ...(connectionResponse(connection, setting) || {}),
+      platformEnabled: setting.enabled,
+      authorized: tenantAllowed(setting, req.tenantId),
+      tenantEnabled: connection?.enabled === true,
+      configured: !!connection,
+      configurationCompleteness: connection
+        ? (connection.platformName && connection.platformUrl && connection.platformSecret ? 100 : 67)
+        : 0,
+    } });
   },
 
   async saveTenantJingpro(req, res) {
     const setting = await getJingproPlatformSetting();
-    if (!setting.enabled) return res.status(404).json({ code: 404001, msg: 'Jingpro extension is not available', data: null });
+    if (!tenantAllowed(setting, req.tenantId)) return res.status(403).json({ code: 403006, msg: setting.enabled ? '当前企业未获平台授权使用 JingPro 扩展应用' : '平台已停用 JingPro 扩展应用', data: null });
     const body = req.body || {};
     const current = await TenantIntegration.findOne({ tenantId: req.tenantId, provider: 'jingpro' }).select('+platformSecret').exec();
     const platformName = body.platformName == null ? String(current?.platformName || '').trim() : String(body.platformName).trim();
     const platformUrl = body.platformUrl == null ? String(current?.platformUrl || '').trim() : String(body.platformUrl).trim();
     const secretProvided = Object.prototype.hasOwnProperty.call(body, 'platformSecret') && String(body.platformSecret || '').trim() !== '';
     const platformSecret = secretProvided ? String(body.platformSecret).trim() : current?.platformSecret;
+    const submittedSecret = Buffer.from(String(platformSecret || ''), 'utf8');
+    const storedSecret = Buffer.from(String(current?.platformSecret || ''), 'utf8');
+    const secretChanged = secretProvided && (
+      submittedSecret.length !== storedSecret.length
+      || !crypto.timingSafeEqual(submittedSecret, storedSecret)
+    );
     if (!platformName || !platformUrl) return res.status(400).json({ code: 400001, msg: 'platformName and platformUrl are required', data: null });
     if (!isPublicHttpUrl(platformUrl)) return res.status(400).json({ code: 400003, msg: 'platformUrl must be a complete http/https URL', data: null });
     if (!platformSecret || platformSecret.length < 16) return res.status(400).json({ code: 400002, msg: 'platformSecret must be at least 16 characters', data: null });
@@ -176,7 +277,10 @@ const IntegrationController = {
       enabled: body.enabled == null ? (current?.enabled || false) : body.enabled === true,
     };
     if (!current) values.keyId = `jingpro_${genHex(24)}`;
-    values.status = values.enabled ? (current?.status === 'active' ? 'active' : 'unverified') : 'disabled';
+    const connectionChanged = secretChanged || platformUrl !== String(current?.platformUrl || '').trim();
+    values.status = values.enabled
+      ? (current?.status === 'active' && !connectionChanged ? 'active' : 'unverified')
+      : 'disabled';
     const connection = await TenantIntegration.findOneAndUpdate(
       { tenantId: req.tenantId, provider: 'jingpro' },
       { $set: values, $setOnInsert: { tenantId: req.tenantId, provider: 'jingpro' } },
@@ -226,7 +330,17 @@ const IntegrationController = {
         publicToken: existing.publicToken, link: existing.link || buildCustomerServiceLink(widgetBase, existing.publicToken),
       } });
     }
-    const username = String(body.username || body.owner_username || body.ownerUsername || '').trim();
+    const [agentCount, channelCount] = await Promise.all([
+      TenantUser.countDocuments({ tenantId: tenant._id, role: { $ne: 'owner' } }),
+      Channel.countDocuments({ tenantId: tenant._id }),
+    ]);
+    if (agentCount >= tenant.plan.agentLimit) {
+      return res.status(409).json({ code: 409004, msg: '已达到员工数量上限', data: null });
+    }
+    if (channelCount >= tenant.plan.channelLimit) {
+      return res.status(409).json({ code: 409005, msg: '已达到渠道数量上限', data: null });
+    }
+    const username = String(body.username || body.owner_username || body.ownerUsername || '').trim().toLowerCase();
     const password = typeof body.password === 'string' ? body.password : '';
     const email = String(body.email || '').trim().toLowerCase();
     if (username.length < 3 || username.length > 50) return res.status(400).json({ code: 400002, msg: 'username/owner_username 必须为 3-50 位', data: null });
@@ -240,8 +354,12 @@ const IntegrationController = {
     let binding;
     let createdUser = false;
     try {
-      user = await TenantUser.findOne({ tenantId: tenant._id, username });
-      if (user) {
+      const [usernameTenant, usernameUser] = await Promise.all([
+        Tenant.exists({ username }),
+        TenantUser.findOne({ username }),
+      ]);
+      user = usernameUser;
+      if (usernameTenant || user) {
         return res.status(409).json({ code: 409002, msg: '该商户账号已被客服企业中的其他用户占用，请先修改冲突账号', data: null });
       } else {
         const [emailTenant, emailUser] = await Promise.all([
@@ -294,6 +412,7 @@ const IntegrationController = {
           tenantId: String(retry.tenantId), tenant: tenant.username, connectionId: String(retry.connectionId), ownerUserId: String(retry.ownerUserId),
           channelId: String(retry.channelId), username, publicToken: retry.publicToken, link: retry.link || '',
         } });
+        return res.status(409).json({ code: 409002, msg: '用户名或邮箱已被使用', data: null });
       }
       return res.status(500).json({ code: 500002, msg: '创建绑定失败: ' + String(e && e.message || e), data: null });
     }
@@ -308,7 +427,7 @@ const IntegrationController = {
     if (!req.file.buffer || req.file.buffer.length > 5 * 1024 * 1024) return res.status(400).json({ code: 400001, msg: '图片大小不能超过 5MB', data: null });
     if (!ext || ext !== extensionByMime[String(req.file.mimetype).toLowerCase()]) return res.status(400).json({ code: 400001, msg: '不支持的图片类型', data: null });
     const relativeDir = path.join(String(binding.tenantId), 'integration');
-    const uploadDir = path.resolve(__dirname, '..', '..', 'uploads', relativeDir);
+    const uploadDir = path.resolve(process.env.UPLOAD_DIR || path.resolve(__dirname, '..', '..', 'uploads'), relativeDir);
     await fs.promises.mkdir(uploadDir, { recursive: true });
     const filename = Date.now() + '_' + crypto.randomBytes(6).toString('hex') + ext;
     await fs.promises.writeFile(path.join(uploadDir, filename), req.file.buffer, { flag: 'wx' });
@@ -422,7 +541,53 @@ const IntegrationController = {
     await invalidateChannelCaches(binding); return res.json({ code: 200, msg: 'deleted', data: null });
   },
 
+  async generateLoginKey(req, res) {
+    const jingproUserId = req.body?.jingpro_user_id != null
+      ? String(req.body.jingpro_user_id).trim()
+      : '';
+    if (!jingproUserId) {
+      return res.status(400).json({ code: 400001, msg: 'Missing jingpro_user_id', data: null });
+    }
+    const binding = await IntegrationBinding.findOne({
+      platformId: 'jingpro',
+      connectionId: req.integration.connectionId,
+      tenantId: req.integration.tenantId,
+      jingproUserId,
+    }).exec();
+    if (!binding || !await bindingAvailable(binding)) {
+      return res.status(403).json({ code: 403012, msg: '当前商户客服账号未绑定或已失效', data: null });
+    }
+    const user = await TenantUser.findOne({
+      _id: binding.ownerUserId,
+      tenantId: binding.tenantId,
+      role: 'agent',
+      status: 'active',
+    }).exec();
+    if (!user) {
+      return res.status(403).json({ code: 403013, msg: '当前商户客服账号不可用', data: null });
+    }
+    const { key, expiresAt, expiresIn } = await generateTemporaryLoginKey({
+      tenantId: binding.tenantId,
+      userId: binding.ownerUserId,
+      source: 'jingpro',
+    });
+    await TenantIntegration.updateOne(
+      { _id: req.integration.connectionId },
+      { $set: { lastUsedAt: new Date() } },
+    );
+    res.set('Cache-Control', 'no-store');
+    return res.json({
+      code: 200,
+      msg: '生成成功（120 秒内有效）',
+      data: { key, loginKey: key, expiresAt, expiresIn },
+    });
+  },
+
   async employeeTokenLogin(req, res) {
+    const setting = await getJingproPlatformSetting();
+    if (!setting.enabled) {
+      return res.status(403).json({ code: 403006, msg: '平台已停用 JingPro 扩展应用', data: null });
+    }
     const tokenError = (reason = 'EMPLOYEE_TOKEN_INVALID', expired = false) => res.status(401).json({
       code: expired ? 401011 : 401010,
       msg: expired ? '密钥已过期' : '密钥错误',
@@ -438,8 +603,11 @@ const IntegrationController = {
     const header = jwtDecodeHeader(token);
     const keyId = header && String(header.kid || '').trim();
     if (!keyId || header.alg !== 'HS256' || header.typ !== 'JWT') return tokenError('EMPLOYEE_TOKEN_MALFORMED');
-    const connection = await TenantIntegration.findOne({ keyId, provider: 'jingpro', enabled: true }).select('+platformSecret').exec();
+    const connection = await TenantIntegration.findOne({ keyId, provider: 'jingpro', enabled: true, status: 'active' }).select('+platformSecret').exec();
     if (!connection?.platformSecret) return tokenError('EMPLOYEE_TOKEN_UNKNOWN');
+    if (!tenantAllowed(setting, connection.tenantId)) {
+      return res.status(403).json({ code: 403006, msg: '当前企业未获平台授权使用 JingPro 扩展应用', data: null });
+    }
     const payload = jwtVerifyHS256(token, connection.platformSecret);
     if (!payload) return tokenError('EMPLOYEE_TOKEN_INVALID');
     const now = Math.floor(Date.now() / 1000);
@@ -457,12 +625,6 @@ const IntegrationController = {
       || !ObjectId.isValid(tenantId) || !ObjectId.isValid(employeeUserId)) {
       return tokenError('EMPLOYEE_TOKEN_INVALID');
     }
-    try {
-      await consumeJti(String(payload.jti), connection._id, Math.max(1000, (expiresAt - now) * 1000));
-    } catch (e) {
-      if (e?.code === 40102) return tokenError('EMPLOYEE_TOKEN_USED');
-      return res.status(503).json({ code: 503005, msg: '登录服务暂不可用，请稍后重试', reason: 'EMPLOYEE_TOKEN_STORE_UNAVAILABLE', data: null });
-    }
     const binding = await IntegrationBinding.findOne({
       connectionId: connection._id,
       tenantId: connection.tenantId,
@@ -478,33 +640,77 @@ const IntegrationController = {
     if (!userAvailable(user, binding) || user.role !== 'agent' || !tenantAvailable(tenant) || !channel) {
       return tokenError('EMPLOYEE_TOKEN_UNAVAILABLE');
     }
+    try {
+      await consumeJti(String(payload.jti), connection._id, Math.max(1000, (expiresAt - now) * 1000));
+    } catch (e) {
+      if (e?.code === 40102) return tokenError('EMPLOYEE_TOKEN_USED');
+      return res.status(503).json({ code: 503005, msg: '登录服务暂不可用，请稍后重试', reason: 'EMPLOYEE_TOKEN_STORE_UNAVAILABLE', data: null });
+    }
     user.lastLoginAt = new Date();
     await Promise.all([
       user.save(),
       TenantIntegration.updateOne({ _id: connection._id }, { $set: { lastUsedAt: new Date() } }),
     ]);
-    const realToken = signToken({
-      type: 'tenant_user',
-      id: String(user._id),
-      tenantId,
-      username: user.username,
-      displayName: user.displayName,
-      role: user.role,
-      pv: passwordVersion(user.password),
-    });
+    const { token: realToken } = await createSessionAndToken({ user, req, loginMethod: 'key' });
     return res.json({ code: 200, msg: 'ok', data: { token: realToken, user: sanitize(user), tenant: sanitize(tenant), redirect: '/messages' } });
   },
 
+  async createSsoCode(req, res) {
+    const token = String(req.body?.token || '').trim();
+    if (!token) return res.status(400).json({ code: 400010, msg: 'Missing SSO token', data: null });
+    const header = jwtDecodeHeader(token);
+    if (!header || String(header.kid || '') !== String(req.integration.keyId) || header.alg !== 'HS256' || header.typ !== 'JWT') {
+      return res.status(400).json({ code: 400011, msg: 'Invalid SSO token header', data: null });
+    }
+    const payload = jwtVerifyHS256(token, req.integrationConnection.platformSecret);
+    const now = Math.floor(Date.now() / 1000);
+    if (!payload || String(payload.sub || '') !== 'sso' || String(payload.aud || '') !== 'kefu-sso'
+      || String(payload.iss || '') !== `jingpro:${req.integration.keyId}`
+      || String(payload.connection_id || '') !== String(req.integration.keyId)
+      || !String(payload.jti || '').trim() || payload.jingpro_user_id == null
+      || !Number.isInteger(payload.iat) || !Number.isInteger(payload.exp)
+      || payload.iat > now + 30 || payload.exp <= payload.iat
+      || payload.exp <= now || payload.exp - payload.iat > 300) {
+      return res.status(400).json({ code: 400012, msg: 'Invalid or expired SSO token', data: null });
+    }
+    const code = crypto.randomBytes(32).toString('base64url');
+    await cache.setJson(`integration:sso-code:${code}`, {
+      token,
+      connectionId: String(req.integration.connectionId),
+    }, Math.max(1, Math.min(120, payload.exp - now)));
+    res.set('Cache-Control', 'no-store');
+    return res.json({ code: 200, msg: 'ok', data: { code } });
+  },
+
   async ssoLogin(req, res) {
-    const token = (req.body && req.body.token) || (req.header('Authorization') || '').replace(/^Bearer\s+/i, '') || '';
-    if (!token) return res.status(401).json({ code: 401001, msg: 'Missing SSO token', data: null });
+    const settings = authSettings(await getSystemSettings());
+    if (!settings.tenantLoginEnabled) {
+      return res.status(403).json({ code: 4034, msg: '客服登录暂时关闭，有问题请联系管理员', data: null });
+    }
+    const code = String(req.body?.code || '').trim();
+    if (!/^[A-Za-z0-9_-]{43}$/.test(code)) {
+      return res.status(401).json({ code: 401001, msg: 'Missing or invalid SSO code', data: null });
+    }
+    const exchanged = await cache.consumeJson(`integration:sso-code:${code}`);
+    const token = exchanged && typeof exchanged.token === 'string' ? exchanged.token : '';
+    const exchangedConnectionId = exchanged && typeof exchanged.connectionId === 'string'
+      ? exchanged.connectionId
+      : '';
+    if (!token || !exchangedConnectionId) {
+      return res.status(401).json({ code: 401001, msg: 'Invalid or used SSO code', data: null });
+    }
     const setting = await getJingproPlatformSetting();
     if (!setting.enabled) return res.status(403).json({ code: 403006, msg: 'Jingpro integration is disabled', data: null });
     const header = jwtDecodeHeader(token);
     const keyId = header && String(header.kid || '').trim();
     if (!keyId || header.alg !== 'HS256' || header.typ !== 'JWT') return res.status(401).json({ code: 401002, msg: 'Invalid SSO token header', data: null });
-    const connection = await TenantIntegration.findOne({ keyId, provider: 'jingpro', enabled: true }).select('+platformSecret').exec();
-    if (!connection) return res.status(401).json({ code: 401003, msg: 'Unknown or disabled integration key', data: null });
+    const connection = await TenantIntegration.findOne({ keyId, provider: 'jingpro', enabled: true, status: 'active' }).select('+platformSecret').exec();
+    if (!connection || exchangedConnectionId !== String(connection._id)) {
+      return res.status(401).json({ code: 401003, msg: 'Unknown, disabled or inactive integration key', data: null });
+    }
+    if (!tenantAllowed(setting, connection.tenantId)) {
+      return res.status(403).json({ code: 403006, msg: '当前企业未获平台授权使用 JingPro 扩展应用', data: null });
+    }
     const payload = jwtVerifyHS256(token, connection.platformSecret);
     if (!payload) return res.status(401).json({ code: 401003, msg: 'Invalid SSO token signature', data: null });
     const now = Math.floor(Date.now() / 1000);
@@ -520,12 +726,6 @@ const IntegrationController = {
     }
     const jingproUserId = payload.jingpro_user_id != null ? String(payload.jingpro_user_id) : '';
     if (!jingproUserId) return res.status(401).json({ code: 401007, msg: 'SSO token missing jingpro_user_id claim', data: null });
-    try {
-      await consumeJti(String(payload.jti), connection._id, 300 * 1000);
-    } catch (e) {
-      if (e && e.code === 40102) return res.status(401).json({ code: 40102, msg: 'SSO token already used', data: null });
-      return res.status(500).json({ code: 500005, msg: 'JTI store error', data: null });
-    }
     const binding = await IntegrationBinding.findOne({ connectionId: connection._id, tenantId: connection.tenantId, jingproUserId }).exec();
     if (!binding) return res.status(401).json({ code: 401008, msg: 'No matching linked user found', data: null });
     const [user, tenant, channel] = await Promise.all([
@@ -540,9 +740,98 @@ const IntegrationController = {
     if (!userAvailable(user, binding) || user.role !== 'agent' || !tenantAvailable(tenant) || !channel) {
       return res.status(401).json({ code: 401009, msg: 'Linked user, tenant or channel is unavailable', data: null });
     }
+    try {
+      await consumeJti(String(payload.jti), connection._id, Math.max(1000, (expiresAt - now) * 1000));
+    } catch (e) {
+      if (e && e.code === 40102) return res.status(401).json({ code: 40102, msg: 'SSO token already used', data: null });
+      return res.status(500).json({ code: 500005, msg: 'JTI store error', data: null });
+    }
     await TenantIntegration.updateOne({ _id: connection._id }, { $set: { lastUsedAt: new Date() } });
-    const realToken = signToken({ type: 'tenant_user', id: String(user._id), tenantId: String(connection.tenantId), role: user.role }, '7d');
+    const { token: realToken } = await createSessionAndToken({ user, req, loginMethod: 'key', expiresIn: '7d' });
     return res.json({ code: 200, msg: 'ok', data: { token: realToken, userType: 'merchant', user: sanitize(user), tenant: sanitize(tenant), redirect: '/messages' } });
+  },
+
+  async listAdminExtensions(req, res) {
+    const platforms = await listPlatformExtensions();
+    return res.json({ code: 200, msg: 'ok', data: await extensionUsage(platforms) });
+  },
+
+  async getAdminExtension(req, res) {
+    try {
+      const items = await extensionUsage([await getPlatformExtension(req.params.provider)]);
+      return res.json({ code: 200, msg: 'ok', data: items[0] });
+    } catch (error) {
+      return res.status(error.status || 404).json({ code: 404001, msg: '扩展应用不存在', data: null });
+    }
+  },
+
+  async setAdminExtensionStatus(req, res) {
+    const scopeMode = req.body?.scopeMode === 'selected' ? 'selected' : 'all';
+    const tenantIds = Array.isArray(req.body?.tenantIds) ? [...new Set(req.body.tenantIds.map(String))] : [];
+    if (req.body?.confirmed !== true || typeof req.body?.enabled !== 'boolean') {
+      return res.status(400).json({ code: 400004, msg: '请确认启停操作', data: null });
+    }
+    if (scopeMode === 'selected' && (!tenantIds.length || tenantIds.some(id => !ObjectId.isValid(id)))) {
+      return res.status(400).json({ code: 400005, msg: '指定企业范围无效', data: null });
+    }
+    if (scopeMode === 'selected' && await Tenant.countDocuments({ _id: { $in: tenantIds } }) !== tenantIds.length) {
+      return res.status(400).json({ code: 400005, msg: '指定企业不存在', data: null });
+    }
+    const provider = req.params.provider;
+    const patch = { enabled: req.body.enabled, scopeMode, tenantIds };
+    if (provider === 'jingpro') {
+      const serverBaseUrl = req.body?.serverBaseUrl == null ? undefined : String(req.body.serverBaseUrl).trim();
+      const widgetBaseUrl = req.body?.widgetBaseUrl == null ? undefined : String(req.body.widgetBaseUrl).trim();
+      if (serverBaseUrl !== undefined && !isPublicHttpUrl(serverBaseUrl)) {
+        return res.status(400).json({ code: 400001, msg: '客服 API 公共地址必须是完整的 http/https URL', data: null });
+      }
+      if (widgetBaseUrl !== undefined && !isPublicHttpUrl(widgetBaseUrl)) {
+        return res.status(400).json({ code: 400001, msg: '客户聊天公共地址必须是完整的 http/https URL', data: null });
+      }
+      if (serverBaseUrl !== undefined) patch.serverBaseUrl = serverBaseUrl;
+      if (widgetBaseUrl !== undefined) patch.widgetBaseUrl = widgetBaseUrl;
+    }
+    try {
+      const before = await getPlatformExtension(provider);
+      const after = await setPlatformControl(provider, patch);
+      let revoked = null;
+      if (after.provider === 'wechat_official') {
+        if (before.enabled && !after.enabled) {
+          revoked = await revokeWechatPlatformSessions(req, '微信公众号扩展已被平台停用');
+        } else if (after.enabled && after.scopeMode === 'selected') {
+          const previouslyAllowedAll = before.enabled && before.scopeMode !== 'selected';
+          const removedTenantIds = previouslyAllowedAll
+            ? await Tenant.find({ _id: { $nin: after.tenantIds } }).distinct('_id')
+            : before.tenantIds.filter(id => !after.tenantIds.includes(id));
+          if (removedTenantIds.length) {
+            revoked = await revokeWechatPlatformSessions(
+              req,
+              '当前企业的微信公众号平台授权已被撤销',
+              { tenantId: { $in: removedTenantIds } },
+            );
+          }
+        }
+      }
+      await recordOperation({
+        req,
+        tenantId: null,
+        user: req.admin,
+        action: after.enabled ? 'extension.platform.enable' : 'extension.platform.disable',
+        detail: `provider=${after.provider};before=${before.enabled};after=${after.enabled};scopeBefore=${before.scopeMode};scopeAfter=${after.scopeMode};scopeCount=${after.tenantIds.length};changed=${before.enabled !== after.enabled || before.scopeMode !== after.scopeMode || before.tenantIds.join(',') !== after.tenantIds.join(',')};tenantSessionsRevoked=${revoked?.tenantSessions || 0};customerSessionsRevoked=${revoked?.customerSessions || 0}`,
+      });
+      const [result] = await extensionUsage([after]);
+      return res.json({
+        code: 200,
+        msg: before.enabled !== after.enabled
+          ? (after.enabled ? '平台已启用' : '平台已停用')
+          : (before.scopeMode !== after.scopeMode || before.tenantIds.join(',') !== after.tenantIds.join(',')
+            ? '企业授权范围已更新'
+            : '平台设置未变化'),
+        data: result,
+      });
+    } catch (error) {
+      return res.status(error.status || 404).json({ code: 404001, msg: '扩展应用不存在', data: null });
+    }
   },
 
   async getAdminSetting(req, res) {
@@ -553,8 +842,12 @@ const IntegrationController = {
   async setAdminSetting(req, res) {
     const body = req.body || {};
     const current = await getJingproPlatformSetting();
+    if (body.enabled != null && body.enabled !== current.enabled) {
+      return res.status(400).json({ code: 400004, msg: '请使用扩展应用启停接口并完成二次确认', data: null });
+    }
     const setting = {
-      enabled: body.enabled == null ? current.enabled : body.enabled === true,
+      ...current,
+      enabled: current.enabled,
       serverBaseUrl: body.serverBaseUrl == null ? current.serverBaseUrl : String(body.serverBaseUrl).trim().replace(/\/+$/, ''),
       widgetBaseUrl: body.widgetBaseUrl == null ? current.widgetBaseUrl : String(body.widgetBaseUrl).trim().replace(/\/+$/, ''),
     };

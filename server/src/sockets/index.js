@@ -9,6 +9,10 @@ const CustomerAccount = require('../models/CustomerAccount');
 const PlatformAdmin = require('../models/PlatformAdmin');
 const Tenant = require('../models/Tenant');
 const TenantUser = require('../models/TenantUser');
+const { validateSession } = require('../services/tenantSessionService');
+const { validateSession: validateCustomerSession } = require('../services/customerSessionService');
+const maintenanceService = require('../services/maintenanceService');
+const migrationControl = require('../services/migrationControl');
 
 function broadcastPresence(io, user, online) {
   const room = user.type === 'admin' ? 'admin' : user.tenantId && `presence-tenant-${user.tenantId}`;
@@ -21,6 +25,7 @@ function broadcastPresence(io, user, online) {
 }
 
 async function setupSocketIO(io) {
+  maintenanceService.attachIO(io);
   const pubClient = getRedis();
   if (pubClient) {
     try {
@@ -51,12 +56,19 @@ async function setupSocketIO(io) {
     // 回查当前身份及所属资源，避免失效或伪造上下文的 token 加入广播房间。
     try {
       if (payload.type === 'tenant_user') {
+        const loginSession = payload.sid && await validateSession(payload);
+        if (!loginSession) return next(new Error('Session invalidated'));
+        if (loginSession.loginMethod === 'wechat') {
+          socket.wechatBindingId = String(loginSession.wechatBindingId);
+          const binding = await require('../models/WechatIdentityBinding').findById(loginSession.wechatBindingId);
+          socket.wechatAccountId = String(binding.officialAccountId);
+        }
         const user = await TenantUser.findOne({ _id: payload.id, tenantId: payload.tenantId });
         const tenant = user && await Tenant.findById(user.tenantId).select('status');
-        if (!user || user.status !== 'active' || !tenant || tenant.status !== 'active') {
+        if (!user || user.status !== 'active' || !tenant || !['active', 'trial'].includes(tenant.status)) {
           return next(new Error('User not found or disabled'));
         }
-        if (payload.pv && passwordVersion(user.password) !== payload.pv) {
+        if (!payload.pv || passwordVersion(user.password) !== payload.pv) {
           return next(new Error('Token invalidated'));
         }
         socket.user = {
@@ -65,6 +77,17 @@ async function setupSocketIO(io) {
           tenantId: user.tenantId.toString(),
         };
       } else if (payload.type === 'customer') {
+        const customerSession = payload.sid && await validateCustomerSession(payload);
+        if (!customerSession) return next(new Error('Session invalidated'));
+        socket.customerSession = customerSession;
+        if (customerSession.loginMethod === 'wechat') {
+          socket.wechatBindingId = String(customerSession.wechatBindingId);
+          const binding = await require('../models/WechatIdentityBinding')
+            .findById(customerSession.wechatBindingId)
+            .select('officialAccountId');
+          if (!binding) return next(new Error('Wechat binding invalidated'));
+          socket.wechatAccountId = String(binding.officialAccountId);
+        }
         if ((payload.id || payload.tenantId || payload.channelId) && !(payload.id && payload.tenantId && payload.channelId)) {
           return next(new Error('Customer context is invalid'));
         }
@@ -107,6 +130,10 @@ async function setupSocketIO(io) {
         if (payload.pv && passwordVersion(admin.password) !== payload.pv) {
           return next(new Error('Token invalidated'));
         }
+        const pointer = await migrationControl.readPointer();
+        if (!Number.isSafeInteger(payload.dg) || payload.dg !== pointer.generation) {
+          return next(new Error('Database generation changed'));
+        }
         socket.user = { ...payload, role: admin.role };
       } else {
         return next(new Error('Invalid user type'));
@@ -119,6 +146,32 @@ async function setupSocketIO(io) {
   });
   
   io.on('connection', async (socket) => {
+    if (await maintenanceService.isFrozen() && socket.user?.type !== 'admin') {
+      socket.emit('maintenance', { message: '系统正在迁移，实时写入暂时冻结' });
+      return socket.disconnect(true);
+    }
+    socket.use((event, next) => maintenanceService.socketGuard(socket, event, next));
+    const continuousSessionValidator = socket.customerSession
+      ? validateCustomerSession
+      : socket.wechatBindingId ? validateSession : null;
+    if (continuousSessionValidator) {
+      // 可撤销会话不能只在握手时鉴权：每次广播出站和入站事件前持续回查。
+      const writeToEngine = socket.client.writeToEngine.bind(socket.client);
+      let outbound = Promise.resolve();
+      socket.client.writeToEngine = (data, options) => {
+        outbound = outbound.then(async () => {
+          if (!socket.connected) return;
+          if (!await continuousSessionValidator(socket.user, { touch: false })) { socket.disconnect(true); return; }
+          writeToEngine(data, options);
+        }).catch(() => socket.disconnect(true));
+      };
+      socket.use(async (event, next) => {
+        try {
+          if (!await continuousSessionValidator(socket.user, { touch: false })) { socket.disconnect(true); return; }
+          next();
+        } catch { socket.disconnect(true); }
+      });
+    }
     // 按用户类型加入房间
     if (socket.user) {
       if (socket.user.type === 'tenant_user') {
@@ -132,14 +185,24 @@ async function setupSocketIO(io) {
           socket.join(`tenant-${socket.user.tenantId}`);
         }
         socket.join(`agent-${socket.user.id}`);
+        socket.join(`tenant-session-${socket.user.sid}`);
+        if (socket.wechatBindingId) {
+          socket.join(`wechat-binding-${socket.wechatBindingId}`);
+          socket.join(`wechat-account-${socket.wechatAccountId}`);
+        }
         socket.join(`presence-tenant-${socket.user.tenantId}`);
       } else if (socket.user.type === 'customer') {
+        socket.join(`customer-session-${socket.user.sid}`);
         if (socket.user.id) socket.join(`customer-${socket.user.id}`);
         if (socket.user.accountId) {
           socket.join(`customer-account-${socket.user.accountId}`);
         }
         if (socket.user.tenantId) socket.join(`presence-tenant-${socket.user.tenantId}`);
         if (socket.user.channelId) socket.join(`channel-${socket.user.channelId}`);
+        if (socket.wechatBindingId) {
+          socket.join(`wechat-binding-${socket.wechatBindingId}`);
+          socket.join(`wechat-account-${socket.wechatAccountId}`);
+        }
       } else if (socket.user.type === 'admin') {
         socket.join('admin');
       }
